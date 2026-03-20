@@ -1,8 +1,15 @@
+import gleam/bytes_tree
+import gleam/erlang/charlist
 import gleam/erlang/process
+import gleam/http
 import gleam/http/request
+import gleam/http/response
+import gleam/int
+import gleam/list
 import gleam/option
-import glisten/socket
-import glisten/transport
+import gleam/otp/actor
+import internal/http as http_
+import internal/socket
 
 pub opaque type Next(state, message) {
   Continue(state: state, selector: option.Option(process.Selector(message)))
@@ -51,7 +58,79 @@ pub type Message(message) {
 }
 
 pub opaque type Connection {
-  Connection(transport: transport.Transport, socket: socket.Socket)
+  Connection(transport: socket.Transport, socket: socket.Socket)
+}
+
+pub type SocketReason {
+  Closed
+  Timeout
+  Badarg
+  Terminated
+  Eaddrinuse
+  Eaddrnotavail
+  Eafnosupport
+  Ealready
+  Econnaborted
+  Econnrefused
+  Econnreset
+  Edestaddrreq
+  Ehostdown
+  Ehostunreach
+  Einprogress
+  Eisconn
+  Emsgsize
+  Enetdown
+  Enetunreach
+  Enopkg
+  Enoprotoopt
+  Enotconn
+  Enotty
+  Enotsock
+  Eproto
+  Eprotonosupport
+  Eprototype
+  Esocktnosupport
+  Etimedout
+  Ewouldblock
+  Exbadport
+  Exbadseq
+}
+
+fn to_socket_reason(reason: socket.SocketReason) -> SocketReason {
+  case reason {
+    socket.Closed -> Closed
+    socket.Timeout -> Timeout
+    socket.Badarg -> Badarg
+    socket.Terminated -> Terminated
+    socket.Eaddrinuse -> Eaddrinuse
+    socket.Eaddrnotavail -> Eaddrnotavail
+    socket.Eafnosupport -> Eafnosupport
+    socket.Ealready -> Ealready
+    socket.Econnaborted -> Econnaborted
+    socket.Econnrefused -> Econnrefused
+    socket.Econnreset -> Econnreset
+    socket.Edestaddrreq -> Edestaddrreq
+    socket.Ehostdown -> Ehostdown
+    socket.Ehostunreach -> Ehostunreach
+    socket.Einprogress -> Einprogress
+    socket.Eisconn -> Eisconn
+    socket.Emsgsize -> Emsgsize
+    socket.Enetdown -> Enetdown
+    socket.Enetunreach -> Enetunreach
+    socket.Enopkg -> Enopkg
+    socket.Enoprotoopt -> Enoprotoopt
+    socket.Enotconn -> Enotconn
+    socket.Enotty -> Enotty
+    socket.Enotsock -> Enotsock
+    socket.Eproto -> Eproto
+    socket.Eprotonosupport -> Eprotonosupport
+    socket.Eprototype -> Eprototype
+    socket.Esocktnosupport -> Esocktnosupport
+    socket.Etimedout -> Etimedout
+    socket.Ewouldblock -> Ewouldblock
+    socket.Exbadport -> Exbadport
+    socket.Exbadseq -> Exbadseq
+  }
 }
 
 pub type CloseReason {
@@ -127,4 +206,79 @@ pub fn on_close(
   on_close: fn(state, CloseReason) -> Nil,
 ) -> Builder(body, state, message) {
   Builder(..builder, on_close:)
+}
+
+pub type StartError {
+  ActorFailed(actor.StartError)
+  SocketFailed(SocketReason)
+  UpgradeFailed
+}
+
+pub fn start(
+  builder: Builder(body, state, message),
+) -> Result(actor.Started(process.Subject(message)), StartError) {
+  let transport = case builder.request.scheme {
+    http.Https -> socket.Ssl
+    http.Http -> socket.Tcp
+  }
+
+  use response <- handshake(
+    builder.request,
+    builder.connection_timeout,
+    transport,
+  )
+
+  todo
+}
+
+fn handshake(
+  request: request.Request(body),
+  connection_timeout: Int,
+  transport: socket.Transport,
+  handle_response: fn(#(response.Response(BitArray), BitArray)) ->
+    Result(actor.Started(process.Subject(message)), StartError),
+) -> Result(actor.Started(process.Subject(message)), StartError) {
+  let #(options, default_port) = case transport {
+    socket.Ssl -> #(
+      [
+        socket.Cacerts(socket.get_system_cacerts()),
+        socket.ServerNameIndication(socket.get_custom_hostname_check()),
+      ],
+      443,
+    )
+    socket.Tcp -> #([], 80)
+  }
+
+  use socket <- unwrap_socket(socket.connect(
+    transport,
+    charlist.from_string(request.host),
+    option.unwrap(request.port, default_port),
+    list.append(socket.default_options, options),
+    connection_timeout,
+  ))
+
+  let data = http_.construct_upgrade(request)
+  use _nil <- unwrap_socket(socket.send(transport, socket, data))
+
+  case http_.decode_response(transport, socket, connection_timeout) {
+    Ok(#(response, remaining)) -> {
+      case response.status {
+        101 -> handle_response(#(response, remaining))
+        _ -> Error(UpgradeFailed)
+      }
+    }
+    Error(http_.SocketFailed(reason)) ->
+      Error(SocketFailed(to_socket_reason(reason)))
+    Error(http_.MalformedRequest) -> Error(UpgradeFailed)
+  }
+}
+
+fn unwrap_socket(
+  result: Result(return, socket.SocketReason),
+  handle_return: fn(return) -> Result(continue, StartError),
+) -> Result(continue, StartError) {
+  case result {
+    Ok(return) -> handle_return(return)
+    Error(reason) -> Error(SocketFailed(to_socket_reason(reason)))
+  }
 }
