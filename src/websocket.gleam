@@ -1,10 +1,8 @@
-import gleam/bytes_tree
 import gleam/erlang/charlist
 import gleam/erlang/process
 import gleam/http
 import gleam/http/request
 import gleam/http/response
-import gleam/int
 import gleam/list
 import gleam/option
 import gleam/otp/actor
@@ -227,6 +225,8 @@ pub fn start(
     builder.connection_timeout,
     transport,
   )
+
+  echo response
 
   todo
 }

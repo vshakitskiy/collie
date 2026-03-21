@@ -1,5 +1,6 @@
 import gleam/bit_array
 import gleam/bytes_tree
+import gleam/crypto
 import gleam/http/request
 import gleam/http/response
 import gleam/int
@@ -44,15 +45,19 @@ pub fn construct_upgrade(request: request.Request(body)) -> bytes_tree.BytesTree
   |> bytes_tree.append_string("host: " <> request.host <> port <> "\r\n")
   |> bytes_tree.append_string("connection: upgrade\r\n")
   |> bytes_tree.append_string("upgrade: websocket\r\n")
-  // TODO: implement websocks function
-  // |> bytes_tree.append_string(
-  //   "sec-websocket-key" <> websocks.client_key() <> "\r\n",
-  // )
+  |> bytes_tree.append_string(
+    "sec-websocket-key: " <> websocket_key() <> "\r\n",
+  )
   |> bytes_tree.append_string("sec-websocket-version: 13\r\n")
   |> bytes_tree.append_string(
     "sec-websocket-extensions: permessage-deflate\r\n",
   )
   |> bytes_tree.append_string(headers)
+}
+
+fn websocket_key() -> String {
+  crypto.strong_random_bytes(16)
+  |> bit_array.base64_encode(True)
 }
 
 @external(erlang, "websocket_ffi", "validate_query")
@@ -79,7 +84,7 @@ pub type Packet {
   HttpEoh
 }
 
-@external(erlang, "gramps_ffi", "decode_packet")
+@external(erlang, "websocket_ffi", "decode_packet")
 fn decode_packet(
   kind: PacketType,
   bin: BitArray,
