@@ -6,13 +6,21 @@
          custom_sni_matcher/0, validate_query/1, decode_packet/2, validate_field_value/1]).
 
 coerce_socket_message({tcp, _Socket, Data}) ->
-  Data;
+  {packet, Data};
 coerce_socket_message({ssl, _Socket, Data}) ->
-  Data;
+  {packet, Data};
+coerce_socket_message({tcp_closed, _Socket}) ->
+  close;
+coerce_socket_message({ssl_closed, _Socket}) ->
+  close;
+coerce_socket_message({tcp_passive, _Socket}) ->
+  passive;
+coerce_socket_message({ssl_passive, _Socket}) ->
+  passive;
 coerce_socket_message({tcp_error, _Socket, Reason}) ->
-  Reason;
+  {socket_error, Reason};
 coerce_socket_message({ssl_error, _Socket, Reason}) ->
-  Reason.
+  {socket_error, Reason}.
 
 to_erl_option({active_mode, once}) ->
   {active, once};
@@ -121,8 +129,10 @@ custom_sni_matcher() ->
 
 validate_query(Query) ->
   case uri_string:dissect_query(Query) of
-      {error, _, _} -> none;
-      _Pairs -> {some, Query}
+    {error, _, _} ->
+      none;
+    _Pairs ->
+      {some, Query}
   end.
 
 decode_packet(Type, Bin) ->
