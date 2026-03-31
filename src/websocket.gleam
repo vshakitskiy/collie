@@ -158,12 +158,33 @@ pub type CloseReason {
   NoCloseReason
 }
 
+fn to_close_reason(reason: websocks.CloseReason) -> CloseReason {
+  case reason {
+    websocks.NormalClosure(data) -> NormalClosure(data)
+    websocks.GoingAway(data:) -> GoingAway(data:)
+    websocks.ProtocolError(data:) -> ProtocolError(data:)
+    websocks.UnsupportedData(data:) -> UnsupportedData(data:)
+    websocks.InvalidPayloadData(data:) -> InvalidPayloadData(data:)
+    websocks.PolicyViolation(data:) -> PolicyViolation(data:)
+    websocks.MessageTooBig(data:) -> MessageTooBig(data:)
+    websocks.MandatoryExtension(data:) -> MandatoryExtension(data:)
+    websocks.InternalError(data:) -> InternalError(data:)
+    websocks.ServiceRestart(data:) -> ServiceRestart(data:)
+    websocks.TryAgainLater(data:) -> TryAgainLater(data:)
+    websocks.BadGateway(data:) -> BadGateway(data:)
+    websocks.TLSHandshake(data:) -> TLSHandshake(data:)
+    websocks.CustomCloseCode(code:, data:) -> CustomCloseCode(code:, data:)
+    websocks.NoCloseReason -> NoCloseReason
+  }
+}
+
 pub opaque type Builder(body, state, message) {
   Builder(
     request: request.Request(body),
     named: process.Name(WebsocketMessage(message)),
     connection_timeout: Int,
-    initialise: fn() -> Result(Initialised(state, message), String),
+    initialise: fn(process.Subject(WebsocketMessage(message))) ->
+      Result(Initialised(state, message), String),
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, CloseReason) -> Nil,
   )
@@ -177,7 +198,7 @@ pub fn new(
     request:,
     named: process.new_name("client"),
     connection_timeout: 5000,
-    initialise: fn() { Ok(initialised(state)) },
+    initialise: fn(_self) { Ok(initialised(state)) },
     handler: fn(_conn, state, _message) { continue(state) },
     on_close: fn(_state, _reason) { Nil },
   )
@@ -185,7 +206,8 @@ pub fn new(
 
 pub fn new_with_initialiser(
   request: request.Request(body),
-  initialise: fn() -> Result(Initialised(state, message), String),
+  initialise: fn(process.Subject(WebsocketMessage(message))) ->
+    Result(Initialised(state, message), String),
 ) -> Builder(body, state, message) {
   Builder(
     request:,
@@ -227,11 +249,11 @@ pub fn on_close(
 
 type WebsocketState(state, message) {
   WebsocketState(
-    transport: socket.Transport,
-    socket: socket.Socket,
+    conn: Connection,
     user: state,
     context: websocks.Context,
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
+    on_close: fn(state, CloseReason) -> Nil,
   )
 }
 
@@ -312,7 +334,7 @@ pub fn start(builder: Builder(body, state, message)) {
       |> result.map(string.split(_, ";"))
       |> result.unwrap([])
 
-    use Initialised(state, selector) <- result.try(builder.initialise())
+    use Initialised(state, selector) <- result.try(builder.initialise(self))
 
     let compression = case websocks.has_deflate(extensions) {
       True -> option.Some(websocks.get_context_takeovers(extensions))
@@ -321,11 +343,11 @@ pub fn start(builder: Builder(body, state, message)) {
     let context = websocks.create_context(compression)
 
     WebsocketState(
-      transport:,
-      socket:,
+      conn: Connection(transport:, socket:),
       user: state,
       context:,
       handler: builder.handler,
+      on_close: builder.on_close,
     )
     |> actor.initialised
     |> actor.selecting(create_socket_selector(self, selector))
@@ -402,60 +424,124 @@ fn handle_message(
   state: WebsocketState(state, message),
   message: WebsocketMessage(message),
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
-  case echo message {
-    Packet(data) -> handle_packet(data, state, message)
+  case message {
+    Packet(data) -> handle_packet(data, state)
     UserMessage(_) -> todo
-    Passive ->
-      case socket.set_opts(state.transport, state.socket, socket_mode) {
+    Passive -> {
+      let options =
+        socket.set_opts(state.conn.transport, state.conn.socket, socket_mode)
+      case options {
         Ok(Nil) -> actor.continue(state)
-        Error(_reason) -> actor.stop()
+        Error(reason) -> {
+          let reason = socket.reason_to_string(reason)
+
+          InternalError(bit_array.from_string(reason))
+          |> handle_close(state, _, option.Some(reason))
+        }
       }
+    }
+
     SocketError(reason) -> {
-      websocks.close_context(state.context)
+      let reason = socket.reason_to_string(reason)
 
-      socket.reason_to_string(reason)
-      |> actor.stop_abnormal
+      InternalError(bit_array.from_string(reason))
+      |> handle_close(state, _, option.Some(reason))
     }
-    Close -> {
-      websocks.close_context(state.context)
-
-      actor.stop()
-    }
+    Close -> handle_close(state, NoCloseReason, option.None)
   }
-
-  actor.continue(state)
 }
 
 type ResolveState(state, message) {
   ResolveState(
-    transport: socket.Transport,
-    socket: socket.Socket,
+    conn: Connection,
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     next: Next(state, message),
+    reason: option.Option(CloseReason),
   )
 }
 
 fn handle_packet(
   data: BitArray,
   state: WebsocketState(state, message),
-  message: WebsocketMessage(message),
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
-  let conn = Connection(transport: state.transport, socket: state.socket)
-
   let processed =
     websocks.process_incoming_frames(
       data,
       state.context,
       ResolveState(
-        transport: state.transport,
-        socket: state.socket,
+        conn: state.conn,
         handler: state.handler,
         next: Continue(state: state.user, selector: option.None),
+        reason: option.None,
       ),
       handle_frame,
     )
 
-  todo
+  case processed {
+    Ok(#(resolved, context)) -> {
+      case resolved.next {
+        Continue(user, selector) -> {
+          let next = actor.continue(WebsocketState(..state, user:, context:))
+
+          case selector {
+            option.Some(selector) ->
+              process.map_selector(selector, UserMessage)
+              |> actor.with_selector(next, _)
+            option.None -> next
+          }
+        }
+        NormalStop -> {
+          let reason = option.unwrap(resolved.reason, NoCloseReason)
+          handle_close(state, reason, option.None)
+        }
+        AbnormalStop(reason: reason_string) -> {
+          let reason =
+            option.unwrap(
+              resolved.reason,
+              InternalError(<<reason_string:utf8>>),
+            )
+          handle_close(state, reason, option.Some(reason_string))
+        }
+      }
+    }
+    Error(violation) -> {
+      let #(variant, reason) = case violation {
+        websocks.DecodeFailed(websocks.InvalidFrame) -> #(
+          ProtocolError,
+          "Malformed wire format",
+        )
+
+        websocks.DecodeFailed(websocks.NotEnoughData(_data)) ->
+          panic as "Unreachable branch for `process_incoming_frames`!"
+        websocks.ResolveFailed(websocks.NotUtf8) -> #(
+          InvalidPayloadData,
+          "Text frame payload isn't valid UTF-8",
+        )
+        websocks.ResolveFailed(websocks.OrphanedContinuation) -> #(
+          ProtocolError,
+          "Continuation frame without a preceding fragmented start",
+        )
+        websocks.ResolveFailed(websocks.ControlFrameFragmented) -> #(
+          ProtocolError,
+          "Control frame was fragmented",
+        )
+        websocks.ResolveFailed(websocks.FragmentationInterrupted) -> #(
+          ProtocolError,
+          "Complete text/binary frame received mid-fragmentation",
+        )
+        websocks.ResolveFailed(websocks.ConcurrentFragmentation) -> #(
+          ProtocolError,
+          "New fragmented frame started while another is in progress",
+        )
+        websocks.ResolveFailed(websocks.CompressedContinuation) -> #(
+          ProtocolError,
+          "Continuation frame has RSV1 set",
+        )
+      }
+
+      handle_close(state, variant(<<reason:utf8>>), option.Some(reason))
+    }
+  }
 }
 
 fn handle_frame(
@@ -466,83 +552,103 @@ fn handle_frame(
   case frame {
     websocks.Control(websocks.Ping(payload)) -> {
       case bit_array.byte_size(payload) {
-        size if size > 125 ->
-          websocks.Stop(
-            ResolveState(
-              ..state,
-              next: AbnormalStop("control frame payload exceeds 125 octets"),
-            ),
-          )
+        size if size > 125 -> {
+          let next = AbnormalStop("control frame payload exceeds 125 octets")
+          let reason =
+            ProtocolError(<<"control frame payload exceeds 125 octets">>)
+            |> option.Some
+
+          websocks.Stop(ResolveState(..state, next:, reason:))
+        }
         _ -> {
-          let mask = option.Some(crypto.strong_random_bytes(4))
           let pong =
-            websocks.encode_pong_frame(payload:, masking: mask)
+            option.Some(crypto.strong_random_bytes(4))
+            |> websocks.encode_pong_frame(payload:)
             |> bytes_tree.from_bit_array
 
-          case socket.send(state.transport, state.socket, pong) {
+          case socket.send(state.conn.transport, state.conn.socket, pong) {
             Ok(Nil) -> websocks.Continue(state)
-            Error(reason) ->
-              websocks.Stop(
-                ResolveState(
-                  ..state,
-                  next: AbnormalStop(
-                    "failed to send pong: " <> socket.reason_to_string(reason),
-                  ),
-                ),
-              )
+            Error(reason) -> {
+              let reason =
+                "failed to send pong: " <> socket.reason_to_string(reason)
+              let next = AbnormalStop(reason)
+              let reason = option.Some(InternalError(<<reason:utf8>>))
+
+              websocks.Stop(ResolveState(..state, next:, reason:))
+            }
           }
         }
       }
     }
 
     websocks.Control(websocks.Close(reason)) -> {
-      let mask = option.Some(crypto.strong_random_bytes(4))
-      let close =
-        websocks.encode_close_frame(reason:, masking: mask)
+      let _sent =
+        option.Some(crypto.strong_random_bytes(4))
+        |> websocks.encode_close_frame(reason:)
         |> bytes_tree.from_bit_array
-      let _sent = socket.send(state.transport, state.socket, close)
-      websocks.Stop(ResolveState(..state, next: NormalStop))
+        |> socket.send(state.conn.transport, state.conn.socket, _)
+
+      let reason = option.Some(to_close_reason(reason))
+      websocks.Stop(ResolveState(..state, next: NormalStop, reason:))
     }
 
     websocks.Control(websocks.Pong(_)) -> websocks.Continue(state)
 
-    websocks.Text(payload) -> {
-      case bit_array.to_string(payload) {
-        Ok(text) -> call_handler(state, Text(text))
-        Error(Nil) ->
-          websocks.Stop(
-            ResolveState(
-              ..state,
-              next: AbnormalStop("received invalid UTF-8 in text frame"),
-            ),
-          )
-      }
-    }
-
+    websocks.Text(payload) ->
+      call_handler(state, Text(unsafe_to_string(payload)))
     websocks.Binary(payload) -> call_handler(state, Binary(payload))
 
     websocks.Continuation(_) -> websocks.Continue(state)
   }
 }
 
+@external(erlang, "gleam_stdlib", "identity")
+fn unsafe_to_string(a: BitArray) -> String
+
 fn call_handler(
   state: ResolveState(state, message),
   message: Message(message),
 ) -> websocks.ResolveNext(ResolveState(state, message)) {
   let assert Continue(user_state, selector) = state.next
-  let conn = Connection(transport: state.transport, socket: state.socket)
 
-  let call = exception.rescue(fn() { state.handler(conn, user_state, message) })
+  let call =
+    exception.rescue(fn() { state.handler(state.conn, user_state, message) })
   case call {
     Ok(Continue(user_state, new_selector)) -> {
       let selector = option.or(new_selector, selector)
-      websocks.Continue(
-        ResolveState(..state, next: Continue(user_state, selector)),
-      )
+      ResolveState(..state, next: Continue(user_state, selector))
+      |> websocks.Continue
     }
     Ok(NormalStop) -> websocks.Stop(ResolveState(..state, next: NormalStop))
     Ok(AbnormalStop(reason)) ->
       websocks.Stop(ResolveState(..state, next: AbnormalStop(reason)))
-    Error(_) -> todo
+    Error(exception) -> {
+      let reason = case exception {
+        exception.Errored(_dynamic) ->
+          "An error was raised in the handler. This can be caused by calling the erlang:error/1 function, or some other runtime error."
+        exception.Thrown(_dynamic) ->
+          "A value was thrown in the handler. This can be caused by calling the erlang:throw/1 function."
+        exception.Exited(_dynamic) ->
+          "A process exited in the handler. This can be caused by calling the erlang:exit/1 function."
+      }
+      let next = AbnormalStop(reason)
+      let reason = option.Some(InternalError(<<reason:utf8>>))
+
+      websocks.Stop(ResolveState(..state, next:, reason:))
+    }
+  }
+}
+
+fn handle_close(
+  state: WebsocketState(state, message),
+  reason: CloseReason,
+  abnormal: option.Option(String),
+) {
+  websocks.close_context(state.context)
+  state.on_close(state.user, reason)
+
+  case abnormal {
+    option.Some(reason) -> actor.stop_abnormal(reason)
+    option.None -> actor.stop()
   }
 }
