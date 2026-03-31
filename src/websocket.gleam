@@ -426,7 +426,10 @@ fn handle_message(
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
   case message {
     Packet(data) -> handle_packet(data, state)
-    UserMessage(_) -> todo
+    UserMessage(message) -> {
+      let resolved = call_handler(new_resolve_state(state), User(message))
+      resolve_next(resolved.state, state)
+    }
     Passive -> {
       let options =
         socket.set_opts(state.conn.transport, state.conn.socket, socket_mode)
@@ -460,59 +463,35 @@ type ResolveState(state, message) {
   )
 }
 
+fn new_resolve_state(state: WebsocketState(state, message)) {
+  ResolveState(
+    conn: state.conn,
+    handler: state.handler,
+    next: Continue(state: state.user, selector: option.None),
+    reason: option.None,
+  )
+}
+
 fn handle_packet(
   data: BitArray,
   state: WebsocketState(state, message),
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
   let processed =
-    websocks.process_incoming_frames(
-      data,
-      state.context,
-      ResolveState(
-        conn: state.conn,
-        handler: state.handler,
-        next: Continue(state: state.user, selector: option.None),
-        reason: option.None,
-      ),
-      handle_frame,
-    )
+    new_resolve_state(state)
+    |> websocks.process_incoming_frames(data, state.context, _, handle_frame)
 
   case processed {
-    Ok(#(resolved, context)) -> {
-      case resolved.next {
-        Continue(user, selector) -> {
-          let next = actor.continue(WebsocketState(..state, user:, context:))
-
-          case selector {
-            option.Some(selector) ->
-              process.map_selector(selector, UserMessage)
-              |> actor.with_selector(next, _)
-            option.None -> next
-          }
-        }
-        NormalStop -> {
-          let reason = option.unwrap(resolved.reason, NoCloseReason)
-          handle_close(state, reason, option.None)
-        }
-        AbnormalStop(reason: reason_string) -> {
-          let reason =
-            option.unwrap(
-              resolved.reason,
-              InternalError(<<reason_string:utf8>>),
-            )
-          handle_close(state, reason, option.Some(reason_string))
-        }
-      }
-    }
+    Ok(#(resolved, context)) ->
+      resolve_next(resolved, WebsocketState(..state, context:))
     Error(violation) -> {
       let #(variant, reason) = case violation {
         websocks.DecodeFailed(websocks.InvalidFrame) -> #(
           ProtocolError,
           "Malformed wire format",
         )
-
         websocks.DecodeFailed(websocks.NotEnoughData(_data)) ->
           panic as "Unreachable branch for `process_incoming_frames`!"
+
         websocks.ResolveFailed(websocks.NotUtf8) -> #(
           InvalidPayloadData,
           "Text frame payload isn't valid UTF-8",
@@ -540,6 +519,32 @@ fn handle_packet(
       }
 
       handle_close(state, variant(<<reason:utf8>>), option.Some(reason))
+    }
+  }
+}
+
+fn resolve_next(
+  resolved: ResolveState(state, message),
+  state: WebsocketState(state, message),
+) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
+  case resolved.next {
+    Continue(user, selector) -> {
+      let next = actor.continue(WebsocketState(..state, user:))
+      case selector {
+        option.Some(selector) ->
+          process.map_selector(selector, UserMessage)
+          |> actor.with_selector(next, _)
+        option.None -> next
+      }
+    }
+    NormalStop -> {
+      let reason = option.unwrap(resolved.reason, NoCloseReason)
+      handle_close(state, reason, option.None)
+    }
+    AbnormalStop(reason: reason_string) -> {
+      let reason =
+        option.unwrap(resolved.reason, InternalError(<<reason_string:utf8>>))
+      handle_close(state, reason, option.Some(reason_string))
     }
   }
 }
