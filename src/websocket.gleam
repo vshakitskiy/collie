@@ -12,6 +12,7 @@ import gleam/int
 import gleam/list
 import gleam/option
 import gleam/otp/actor
+import gleam/otp/supervision
 import gleam/result
 import gleam/string
 import internal/http as http_
@@ -65,7 +66,11 @@ pub type Message(message) {
 }
 
 pub opaque type Connection {
-  Connection(transport: socket.Transport, socket: socket.Socket)
+  Connection(
+    transport: socket.Transport,
+    socket: socket.Socket,
+    context: websocks.Context,
+  )
 }
 
 pub type SocketReason {
@@ -178,10 +183,30 @@ fn to_close_reason(reason: websocks.CloseReason) -> CloseReason {
   }
 }
 
+fn to_internal_close_reason(reason: CloseReason) -> websocks.CloseReason {
+  case reason {
+    NormalClosure(data:) -> websocks.NormalClosure(data:)
+    GoingAway(data:) -> websocks.GoingAway(data:)
+    ProtocolError(data:) -> websocks.ProtocolError(data:)
+    UnsupportedData(data:) -> websocks.UnsupportedData(data:)
+    InvalidPayloadData(data:) -> websocks.InvalidPayloadData(data:)
+    PolicyViolation(data:) -> websocks.PolicyViolation(data:)
+    MessageTooBig(data:) -> websocks.MessageTooBig(data:)
+    MandatoryExtension(data:) -> websocks.MandatoryExtension(data:)
+    InternalError(data:) -> websocks.InternalError(data:)
+    ServiceRestart(data:) -> websocks.ServiceRestart(data:)
+    TryAgainLater(data:) -> websocks.TryAgainLater(data:)
+    BadGateway(data:) -> websocks.BadGateway(data:)
+    TLSHandshake(data:) -> websocks.TLSHandshake(data:)
+    CustomCloseCode(code:, data:) -> websocks.CustomCloseCode(code:, data:)
+    NoCloseReason -> websocks.NoCloseReason
+  }
+}
+
 pub opaque type Builder(body, state, message) {
   Builder(
     request: request.Request(body),
-    named: process.Name(WebsocketMessage(message)),
+    named: option.Option(process.Name(WebsocketMessage(message))),
     connection_timeout: Int,
     initialise: fn(process.Subject(WebsocketMessage(message))) ->
       Result(Initialised(state, message), String),
@@ -196,7 +221,7 @@ pub fn new(
 ) -> Builder(body, state, message) {
   Builder(
     request:,
-    named: process.new_name("client"),
+    named: option.None,
     connection_timeout: 5000,
     initialise: fn(_self) { Ok(initialised(state)) },
     handler: fn(_conn, state, _message) { continue(state) },
@@ -211,7 +236,7 @@ pub fn new_with_initialiser(
 ) -> Builder(body, state, message) {
   Builder(
     request:,
-    named: process.new_name("client"),
+    named: option.None,
     connection_timeout: 5000,
     initialise:,
     handler: fn(_conn, state, _message) { continue(state) },
@@ -230,7 +255,7 @@ pub fn named(
   builder: Builder(body, state, message),
   name: process.Name(WebsocketMessage(message)),
 ) -> Builder(body, state, message) {
-  Builder(..builder, named: name)
+  Builder(..builder, named: option.Some(name))
 }
 
 pub fn on_message(
@@ -309,54 +334,72 @@ const socket_mode = [socket.ActiveMode(socket.Count(100))]
 @external(erlang, "websocket_ffi", "coerce_socket_message")
 fn coerce_socket_message(record: dynamic.Dynamic) -> WebsocketMessage(message)
 
-pub fn start(builder: Builder(body, state, message)) {
+pub fn start(
+  builder: Builder(body, state, message),
+) -> Result(
+  actor.Started(process.Subject(WebsocketMessage(message))),
+  actor.StartError,
+) {
   let transport = case builder.request.scheme {
     http.Https -> socket.Ssl
     http.Http -> socket.Tcp
   }
 
-  actor.new_with_initialiser(1000, fn(self) {
-    use #(response, socket, remaining) <- handshake(
-      builder.request,
-      builder.connection_timeout,
-      transport,
-    )
+  let actor =
+    actor.new_with_initialiser(1000, fn(self) {
+      use #(response, socket, remaining) <- handshake(
+        builder.request,
+        builder.connection_timeout,
+        transport,
+      )
 
-    use _ <- unwrap_socket(socket.set_opts(transport, socket, socket_mode))
+      case remaining {
+        <<>> -> Nil
+        remaining -> actor.send(self, Packet(remaining))
+      }
 
-    case remaining {
-      <<>> -> Nil
-      remaining -> actor.send(self, Packet(remaining))
-    }
+      use _ <- unwrap_socket(socket.set_opts(transport, socket, socket_mode))
 
-    let extensions =
-      response.get_header(response, "sec-websocket-extensions")
-      |> result.map(string.split(_, ";"))
-      |> result.unwrap([])
+      let extensions =
+        response.get_header(response, "sec-websocket-extensions")
+        |> result.map(string.split(_, ";"))
+        |> result.unwrap([])
+        |> list.map(string.trim)
 
-    use Initialised(state, selector) <- result.try(builder.initialise(self))
+      use Initialised(state, selector) <- result.try(builder.initialise(self))
 
-    let compression = case websocks.has_deflate(extensions) {
-      True -> option.Some(websocks.get_context_takeovers(extensions))
-      False -> option.None
-    }
-    let context = websocks.create_context(compression)
+      let compression = case websocks.has_deflate(extensions) {
+        True -> option.Some(websocks.get_compression_extensions(extensions))
+        False -> option.None
+      }
+      let context = websocks.create_context(compression, websocks.Client)
 
-    WebsocketState(
-      conn: Connection(transport:, socket:),
-      user: state,
-      context:,
-      handler: builder.handler,
-      on_close: builder.on_close,
-    )
-    |> actor.initialised
-    |> actor.selecting(create_socket_selector(self, selector))
-    |> actor.returning(self)
-    |> Ok
-  })
-  |> actor.named(builder.named)
-  |> actor.on_message(handle_message)
-  |> actor.start
+      WebsocketState(
+        conn: Connection(transport:, socket:, context:),
+        user: state,
+        context:,
+        handler: builder.handler,
+        on_close: builder.on_close,
+      )
+      |> actor.initialised
+      |> actor.selecting(create_socket_selector(self, selector))
+      |> actor.returning(self)
+      |> Ok
+    })
+    |> actor.on_message(handle_message)
+
+  let actor = case builder.named {
+    option.Some(name) -> actor.named(actor, name)
+    option.None -> actor
+  }
+
+  actor.start(actor)
+}
+
+pub fn supervised(
+  builder: Builder(body, state, message),
+) -> supervision.ChildSpecification(process.Subject(WebsocketMessage(message))) {
+  supervision.supervisor(fn() { start(builder) })
 }
 
 fn handshake(
@@ -426,6 +469,7 @@ fn handle_message(
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
   case message {
     Packet(data) -> handle_packet(data, state)
+
     UserMessage(message) -> {
       let resolved = call_handler(new_resolve_state(state), User(message))
       resolve_next(resolved.state, state)
@@ -481,8 +525,10 @@ fn handle_packet(
     |> websocks.process_incoming_frames(data, state.context, _, handle_frame)
 
   case processed {
-    Ok(#(resolved, context)) ->
-      resolve_next(resolved, WebsocketState(..state, context:))
+    Ok(#(resolved, context)) -> {
+      let conn = Connection(..state.conn, context:)
+      resolve_next(resolved, WebsocketState(..state, conn:, context:))
+    }
     Error(violation) -> {
       let #(variant, reason) = case violation {
         websocks.DecodeFailed(websocks.InvalidFrame) -> #(
@@ -549,11 +595,28 @@ fn resolve_next(
   }
 }
 
+fn handle_close(
+  state: WebsocketState(state, message),
+  reason: CloseReason,
+  abnormal: option.Option(String),
+) {
+  websocks.close_context(state.context)
+  state.on_close(state.user, reason)
+
+  case abnormal {
+    option.Some(reason) -> actor.stop_abnormal(reason)
+    option.None -> actor.stop()
+  }
+}
+
 fn handle_frame(
   state: ResolveState(state, message),
-  _context: websocks.Context,
+  context: websocks.Context,
   frame: websocks.Frame,
 ) -> websocks.ResolveNext(ResolveState(state, message)) {
+  let conn = Connection(..state.conn, context:)
+  let state = ResolveState(..state, conn:)
+
   case frame {
     websocks.Control(websocks.Ping(payload)) -> {
       case bit_array.byte_size(payload) {
@@ -644,16 +707,51 @@ fn call_handler(
   }
 }
 
-fn handle_close(
-  state: WebsocketState(state, message),
-  reason: CloseReason,
-  abnormal: option.Option(String),
-) {
-  websocks.close_context(state.context)
-  state.on_close(state.user, reason)
+pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) {
+  option.Some(crypto.strong_random_bytes(4))
+  |> websocks.encode_ping_frame(data, _)
+  |> bytes_tree.from_bit_array
+  |> socket.send(conn.transport, conn.socket, _)
+  |> result.map_error(to_socket_reason)
+}
 
-  case abnormal {
-    option.Some(reason) -> actor.stop_abnormal(reason)
-    option.None -> actor.stop()
+pub fn send_text_frame(
+  conn: Connection,
+  text: String,
+) -> Result(Nil, SocketReason) {
+  option.Some(crypto.strong_random_bytes(4))
+  |> websocks.encode_text_frame(<<text:utf8>>, conn.context, _)
+  |> bytes_tree.from_bit_array
+  |> socket.send(conn.transport, conn.socket, _)
+  |> result.map_error(to_socket_reason)
+}
+
+pub fn send_binary_frame(
+  conn: Connection,
+  bits: BitArray,
+) -> Result(Nil, SocketReason) {
+  option.Some(crypto.strong_random_bytes(4))
+  |> websocks.encode_binary_frame(bits, conn.context, _)
+  |> bytes_tree.from_bit_array
+  |> socket.send(conn.transport, conn.socket, _)
+  |> result.map_error(to_socket_reason)
+}
+
+pub fn send_close_frame(
+  conn: Connection,
+  reason: CloseReason,
+) -> Next(state, message) {
+  let sent =
+    to_internal_close_reason(reason)
+    |> websocks.encode_close_frame(option.Some(crypto.strong_random_bytes(4)))
+    |> bytes_tree.from_bit_array()
+    |> socket.send(conn.transport, conn.socket, _)
+
+  case sent {
+    Ok(Nil) -> NormalStop
+    Error(reason) -> {
+      let reason = socket.reason_to_string(reason)
+      AbnormalStop("Errored while trying to send close frame: " <> reason)
+    }
   }
 }

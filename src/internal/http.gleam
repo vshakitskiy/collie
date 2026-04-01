@@ -1,6 +1,5 @@
 import gleam/bit_array
 import gleam/bytes_tree
-import gleam/crypto
 import gleam/http/request
 import gleam/http/response
 import gleam/int
@@ -9,6 +8,7 @@ import gleam/option
 import gleam/result
 import gleam/string
 import internal/socket
+import websocks
 
 pub fn construct_upgrade(request: request.Request(body)) -> bytes_tree.BytesTree {
   let headers =
@@ -20,7 +20,8 @@ pub fn construct_upgrade(request: request.Request(body)) -> bytes_tree.BytesTree
         | "upgrade"
         | "connection"
         | "sec-websocket-key"
-        | "sec-websocket-version" -> acc
+        | "sec-websocket-version"
+        | "sec-websocket-extensions" -> acc
         key -> acc <> key <> ": " <> value <> "\r\n"
       }
     })
@@ -40,24 +41,20 @@ pub fn construct_upgrade(request: request.Request(body)) -> bytes_tree.BytesTree
     option.Some(query) -> "?" <> query
   }
 
+  let extensions_header =
+    "sec-websocket-extensions: permessage-deflate; client_max_window_bits\r\n"
+
   bytes_tree.new()
   |> bytes_tree.append_string("GET " <> path <> query <> " HTTP/1.1\r\n")
   |> bytes_tree.append_string("host: " <> request.host <> port <> "\r\n")
   |> bytes_tree.append_string("connection: upgrade\r\n")
   |> bytes_tree.append_string("upgrade: websocket\r\n")
   |> bytes_tree.append_string(
-    "sec-websocket-key: " <> websocket_key() <> "\r\n",
+    "sec-websocket-key: " <> websocks.websocket_key() <> "\r\n",
   )
   |> bytes_tree.append_string("sec-websocket-version: 13\r\n")
-  |> bytes_tree.append_string(
-    "sec-websocket-extensions: permessage-deflate\r\n",
-  )
+  |> bytes_tree.append_string(extensions_header)
   |> bytes_tree.append_string(headers)
-}
-
-fn websocket_key() -> String {
-  crypto.strong_random_bytes(16)
-  |> bit_array.base64_encode(True)
 }
 
 @external(erlang, "websocket_ffi", "validate_query")
