@@ -1,4 +1,4 @@
-name = "websocket"
+name = "socktopus"
 version = "1.0.0"
 licences = ["Apache-2.0"]
 description = "Websocket client in Gleam based on websocks"

@@ -57,7 +57,7 @@ pub fn construct_upgrade(request: request.Request(body)) -> bytes_tree.BytesTree
   |> bytes_tree.append_string(headers)
 }
 
-@external(erlang, "websocket_ffi", "validate_query")
+@external(erlang, "socktopus_ffi", "validate_query")
 fn validate_query(query: String) -> option.Option(String)
 
 pub type DecodeError {
@@ -81,7 +81,7 @@ pub type Packet {
   HttpEoh
 }
 
-@external(erlang, "websocket_ffi", "decode_packet")
+@external(erlang, "socktopus_ffi", "decode_packet")
 fn decode_packet(
   kind: PacketType,
   bin: BitArray,
@@ -203,7 +203,7 @@ fn decode_body(
   }
 }
 
-@external(erlang, "websocket_ffi", "validate_field_value")
+@external(erlang, "socktopus_ffi", "validate_field_value")
 fn validate_field_value(value: BitArray) -> Result(String, Nil)
 
 fn formatted_field_by_idx(idx: Int) -> Result(String, Nil) {

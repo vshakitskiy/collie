@@ -6,8 +6,8 @@ import gleam/io
 import gleam/list
 import gleam/otp/actor
 import gleam/result
+import socktopus
 import stratus
-import websocket
 
 const base = "http://127.0.0.1:9001"
 
@@ -16,7 +16,7 @@ type Adapter {
 }
 
 const clients = [
-  Adapter(agent: "websocket", runner: websocket_adapter),
+  Adapter(agent: "socktopus", runner: socktopus_adapter),
   Adapter(agent: "stratus", runner: stratus_adapter),
 ]
 
@@ -37,17 +37,17 @@ fn get_case_count() -> Int {
 
   let result = process.new_subject()
   let assert Ok(actor.Started(pid:, ..)) =
-    websocket.new(req, Nil)
-    |> websocket.on_message(fn(_conn, state, message) {
+    socktopus.new(req, Nil)
+    |> socktopus.on_message(fn(_conn, state, message) {
       case message {
-        websocket.Text(count) -> {
+        socktopus.Text(count) -> {
           process.send(result, count)
-          websocket.continue(state)
+          socktopus.continue(state)
         }
-        _ -> websocket.continue(state)
+        _ -> socktopus.continue(state)
       }
     })
-    |> websocket.start
+    |> socktopus.start
 
   let monitor = process.monitor(pid)
   let selector =
@@ -87,27 +87,27 @@ fn handle_adapters(client: Adapter, case_count: Int) -> Nil {
   io.println("Reports updated for " <> client.agent <> "\n")
 }
 
-fn websocket_adapter(case_number: Int) -> Result(Nil, String) {
+fn socktopus_adapter(case_number: Int) -> Result(Nil, String) {
   let path =
-    "/runCase?case=" <> int.to_string(case_number) <> "&agent=websocket"
+    "/runCase?case=" <> int.to_string(case_number) <> "&agent=socktopus"
   let assert Ok(req) = request.to(base <> path)
 
   let started =
-    websocket.new(req, Nil)
-    |> websocket.on_message(fn(conn, state, message) {
+    socktopus.new(req, Nil)
+    |> socktopus.on_message(fn(conn, state, message) {
       case message {
-        websocket.Text(text) -> {
-          let _ = websocket.send_text_frame(conn, text)
-          websocket.continue(state)
+        socktopus.Text(text) -> {
+          let _ = socktopus.send_text_frame(conn, text)
+          socktopus.continue(state)
         }
-        websocket.Binary(data) -> {
-          let _ = websocket.send_binary_frame(conn, data)
-          websocket.continue(state)
+        socktopus.Binary(data) -> {
+          let _ = socktopus.send_binary_frame(conn, data)
+          socktopus.continue(state)
         }
-        websocket.User(_) -> websocket.continue(state)
+        socktopus.User(_) -> socktopus.continue(state)
       }
     })
-    |> websocket.start
+    |> socktopus.start
 
   case started {
     Ok(actor.Started(pid:, ..)) -> {
@@ -162,7 +162,7 @@ fn update_reports(agent: String) -> Nil {
   let assert Ok(req) = request.to(base <> "/updateReports?agent=" <> agent)
 
   let assert Ok(actor.Started(pid:, ..)) =
-    websocket.new(req, Nil) |> websocket.start
+    socktopus.new(req, Nil) |> socktopus.start
 
   let monitor = process.monitor(pid)
   let selector =

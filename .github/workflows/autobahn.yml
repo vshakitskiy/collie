@@ -20,23 +20,29 @@ jobs:
       - name: Downloading dependencies
         run: gleam deps download
 
-      - name: Start WebSocket server
-        run: gleam run -m autobahn &
-
-      - name: Wait for WebSocket server to start
-        run: sleep 5
-
-      - name: Run autobahn tests (expected to have no panics)
+      - name: Start Autobahn server
         run: |
           docker run --rm \
             -v "${PWD}/autobahn/config.json:/autobahn.json" \
             -v "${PWD}/autobahn:/reports" \
             --network host \
+            -d \
+            --name autobahn-server \
             crossbario/autobahn-testsuite \
-            wstest -m fuzzingclient -s /autobahn.json
+            wstest -m fuzzingserver -s /autobahn.json
+
+      - name: Wait for Autobahn server to start
+        run: sleep 5
+
+      - name: Run WebSocket client tests
+        run: gleam run -m autobahn
+
+      - name: Stop Autobahn server
+        if: always()
+        run: docker stop autobahn-server || true
 
       - name: Upload reports
         uses: actions/upload-artifact@v4
         with:
           name: autobahn-reports
-          path: autobahn/server/
+          path: autobahn/clients/
