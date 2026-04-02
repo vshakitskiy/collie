@@ -12,24 +12,27 @@ import stratus
 
 const base = "http://127.0.0.1:9001"
 
-type Adapter {
-  Adapter(agent: String, runner: fn(Int) -> Result(Nil, String))
+type Client {
+  Client(
+    agent: String,
+    runner: fn(request.Request(String)) -> Result(Nil, String),
+  )
 }
 
 const clients = [
-  Adapter(agent: "collie", runner: collie_adapter),
-  Adapter(agent: "stratus", runner: stratus_adapter),
+  Client(agent: "collie@1", runner: collie_adapter),
+  Client(agent: "stratus@2", runner: stratus_adapter),
 ]
 
 pub fn main() {
   process.trap_exits(True)
 
-  let case_count = get_case_count()
+  let total_cases = get_case_count()
 
-  { "Running " <> int.to_string(case_count) <> " autobahn test cases\n" }
+  { "Running " <> int.to_string(total_cases) <> " autobahn test cases\n" }
   |> io.println
 
-  list.each(clients, handle_adapters(_, case_count))
+  list.each(clients, handle_adapters(_, total_cases))
 
   io.println("Done! Check autobahn/index.html for results.")
 }
@@ -65,19 +68,26 @@ fn get_case_count() -> Int {
   count
 }
 
-fn handle_adapters(client: Adapter, case_count: Int) -> Nil {
+fn handle_adapters(client: Client, total_cases: Int) -> Nil {
   io.println("--- Testing: " <> client.agent <> " ---")
 
-  int.range(from: 1, to: case_count + 1, with: Nil, run: fn(_nil, case_number) {
+  int.range(from: 1, to: total_cases + 1, with: Nil, run: fn(_nil, case_number) {
     io.print(
       "Case "
       <> int.to_string(case_number)
       <> "/"
-      <> int.to_string(case_count)
+      <> int.to_string(total_cases)
       <> "... ",
     )
 
-    case client.runner(case_number) {
+    let path =
+      "/runCase?case="
+      <> int.to_string(case_number)
+      <> "&agent="
+      <> client.agent
+    let assert Ok(req) = request.to(base <> path)
+
+    case client.runner(req) {
       Ok(_) -> io.println("✓")
       Error(reason) -> io.println("✗ (" <> reason <> ")")
     }
@@ -107,10 +117,7 @@ fn handle_started(started: Result(actor.Started(any), actor.StartError)) {
   }
 }
 
-fn collie_adapter(case_number: Int) -> Result(Nil, String) {
-  let path = "/runCase?case=" <> int.to_string(case_number) <> "&agent=collie"
-  let assert Ok(req) = request.to(base <> path)
-
+fn collie_adapter(req: request.Request(String)) -> Result(Nil, String) {
   collie.new(req, Nil)
   |> collie.on_message(fn(conn, state, message) {
     case message {
@@ -129,10 +136,7 @@ fn collie_adapter(case_number: Int) -> Result(Nil, String) {
   |> handle_started
 }
 
-fn stratus_adapter(case_number: Int) -> Result(Nil, String) {
-  let path = "/runCase?case=" <> int.to_string(case_number) <> "&agent=stratus"
-  let assert Ok(req) = request.to(base <> path)
-
+fn stratus_adapter(req: request.Request(String)) -> Result(Nil, String) {
   stratus.new(req, Nil)
   |> stratus.on_message(fn(state, message, conn) {
     case message {
