@@ -7,6 +7,7 @@ import gleam/io
 import gleam/list
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import stratus
 
 const base = "http://127.0.0.1:9001"
@@ -88,27 +89,7 @@ fn handle_adapters(client: Adapter, case_count: Int) -> Nil {
   io.println("Reports updated for " <> client.agent <> "\n")
 }
 
-fn collie_adapter(case_number: Int) -> Result(Nil, String) {
-  let path = "/runCase?case=" <> int.to_string(case_number) <> "&agent=collie"
-  let assert Ok(req) = request.to(base <> path)
-
-  let started =
-    collie.new(req, Nil)
-    |> collie.on_message(fn(conn, state, message) {
-      case message {
-        collie.Text(text) -> {
-          let _ = collie.send_text_frame(conn, text)
-          collie.continue(state)
-        }
-        collie.Binary(data) -> {
-          let _ = collie.send_binary_frame(conn, data)
-          collie.continue(state)
-        }
-        collie.User(_) -> collie.continue(state)
-      }
-    })
-    |> collie.start
-
+fn handle_started(started: Result(actor.Started(any), actor.StartError)) {
   case started {
     Ok(actor.Started(pid:, ..)) -> {
       let monitor = process.monitor(pid)
@@ -119,43 +100,64 @@ fn collie_adapter(case_number: Int) -> Result(Nil, String) {
       process.selector_receive(selector, 120_000)
       |> result.replace_error("timeout")
     }
-    Error(_) -> Error("failed to start")
+    Error(actor.InitFailed(reason)) -> Error(reason)
+    Error(actor.InitTimeout) -> Error("actor init timeout")
+    Error(actor.InitExited(reason)) ->
+      Error("actor init exited: " <> string.inspect(reason))
   }
+}
+
+fn collie_adapter(case_number: Int) -> Result(Nil, String) {
+  let path = "/runCase?case=" <> int.to_string(case_number) <> "&agent=collie"
+  let assert Ok(req) = request.to(base <> path)
+
+  collie.new(req, Nil)
+  |> collie.on_message(fn(conn, state, message) {
+    case message {
+      collie.Text(text) -> {
+        let _ = collie.send_text_frame(conn, text)
+        collie.continue(state)
+      }
+      collie.Binary(data) -> {
+        let _ = collie.send_binary_frame(conn, data)
+        collie.continue(state)
+      }
+      collie.User(_) -> collie.continue(state)
+    }
+  })
+  |> collie.start
+  |> handle_started
 }
 
 fn stratus_adapter(case_number: Int) -> Result(Nil, String) {
   let path = "/runCase?case=" <> int.to_string(case_number) <> "&agent=stratus"
   let assert Ok(req) = request.to(base <> path)
 
-  let started =
-    stratus.new(req, Nil)
-    |> stratus.on_message(fn(state, message, conn) {
-      case message {
-        stratus.Text(text) -> {
-          let _ = stratus.send_text_message(conn, text)
-          stratus.continue(state)
-        }
-        stratus.Binary(data) -> {
-          let _ = stratus.send_binary_message(conn, data)
-          stratus.continue(Nil)
-        }
-        _ -> stratus.continue(Nil)
+  stratus.new(req, Nil)
+  |> stratus.on_message(fn(state, message, conn) {
+    case message {
+      stratus.Text(text) -> {
+        let _ = stratus.send_text_message(conn, text)
+        stratus.continue(state)
       }
-    })
-    |> stratus.start
-
-  case started {
-    Ok(actor.Started(pid:, ..)) -> {
-      let monitor = process.monitor(pid)
-      let selector =
-        process.new_selector()
-        |> process.select_specific_monitor(monitor, fn(_down) { Nil })
-
-      process.selector_receive(selector, 120_000)
-      |> result.replace_error("timeout")
+      stratus.Binary(data) -> {
+        let _ = stratus.send_binary_message(conn, data)
+        stratus.continue(Nil)
+      }
+      _ -> stratus.continue(Nil)
     }
-    Error(_) -> Error("failed to start")
-  }
+  })
+  |> stratus.start
+  |> result.map_error(fn(error) {
+    case error {
+      stratus.ActorFailed(error) -> error
+      stratus.HandshakeFailed(error) ->
+        actor.InitFailed("handshake failed: " <> string.inspect(error))
+      stratus.FailedToTransferSocket(error) ->
+        actor.InitFailed("socket error: " <> string.inspect(error))
+    }
+  })
+  |> handle_started
 }
 
 fn update_reports(agent: String) -> Nil {
