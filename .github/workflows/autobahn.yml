@@ -9,6 +9,10 @@ on:
 jobs:
   autobahn:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
@@ -47,10 +51,12 @@ jobs:
           name: autobahn-reports
           path: autobahn/clients/
 
+      - name: Upload to Pages
+        if: github.ref == 'refs/heads/mistress'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: autobahn/clients
+
       - name: Deploy to GitHub Pages
         if: github.ref == 'refs/heads/mistress'
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./autobahn/clients
-          destination_dir: autobahn
+        uses: actions/deploy-pages@v4
