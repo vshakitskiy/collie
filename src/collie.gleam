@@ -89,6 +89,8 @@
 ////   )
 //// </script>
 
+import collie/internal/http as http_
+import collie/internal/socket
 import exception
 import gleam/bit_array
 import gleam/bytes_tree
@@ -106,8 +108,6 @@ import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
-import collie/internal/http as http_
-import collie/internal/socket
 import websocks
 
 /// Represents an instruction on how WebSocket connection should proceed.
