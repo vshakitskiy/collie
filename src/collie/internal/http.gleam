@@ -1,3 +1,4 @@
+import collie/internal/socket
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/http/request
@@ -7,7 +8,6 @@ import gleam/list
 import gleam/option
 import gleam/result
 import gleam/string
-import internal/socket
 import websocks
 
 pub fn construct_upgrade(request: request.Request(body)) -> bytes_tree.BytesTree {

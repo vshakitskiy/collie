@@ -1,3 +1,94 @@
+//// <script>
+//// const docs = [
+////   {
+////     header: "Builder",
+////     functions: [
+////       "new",
+////       "new_with_initialiser",
+////       "with_connection_timeout",
+////       "named",
+////       "on_message",
+////       "on_close"
+////     ]
+////   },
+////   {
+////     header: "Initialiser",
+////     functions: ["initialised", "selecting"]
+////   },
+////   {
+////     header: "Client",
+////     functions: ["start", "supervised"]
+////   },
+////   {
+////     header: "Handler",
+////     functions: [
+////       "continue",
+////       "continue_with_selector",
+////       "stop",
+////       "stop_abnormal",
+////       "send_ping",
+////       "send_text_frame",
+////       "send_binary_frame",
+////       "send_close_frame"
+////     ]
+////   },
+////   {
+////     header: "User messages",
+////     functions: ["to_user_message"]
+////   }
+//// ]
+////
+//// const callback = () => {
+////   const list = document.querySelector(".sidebar > ul:last-of-type")
+////   const sortedLists = document.createDocumentFragment()
+////   const sortedMembers = document.createDocumentFragment()
+////
+////   for (const section of docs) {
+////     sortedLists.append((() => {
+////       const node = document.createElement("h3")
+////       node.append(section.header)
+////       return node
+////     })())
+////     sortedMembers.append((() => {
+////       const node = document.createElement("h2")
+////       node.append(section.header)
+////       return node
+////     })())
+////
+////     const sortedList = document.createElement("ul")
+////     sortedLists.append(sortedList)
+////
+////     const sortedFunctions = [...section.functions].sort()
+////
+////     for (const funcName of sortedFunctions) {
+////       const href = `#${funcName}`
+////       const member = document.querySelector(
+////         `.member:has(h2 > a[href="${href}"])`
+////       )
+////       const sidebar = list.querySelector(`li:has(a[href="${href}"])`)
+////       sortedList.append(sidebar)
+////       sortedMembers.append(member)
+////     }
+////   }
+////
+////   document.querySelector(".sidebar").insertBefore(sortedLists, list)
+////   document
+////     .querySelector(".module-members:has(#module-values)")
+////     .insertBefore(
+////       sortedMembers,
+////       document.querySelector("#module-values").nextSibling
+////     )
+//// }
+////
+//// document.readyState !== "loading"
+////   ? callback()
+////   : document.addEventListener(
+////     "DOMContentLoaded",
+////     callback,
+////     { once: true }
+////   )
+//// </script>
+
 import exception
 import gleam/bit_array
 import gleam/bytes_tree
@@ -15,20 +106,30 @@ import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
-import internal/http as http_
-import internal/socket
+import collie/internal/http as http_
+import collie/internal/socket
 import websocks
 
+/// Represents an instruction on how WebSocket connection should proceed.
+/// - continue processing the WebSocket connection.
+/// - continue processing the WebSocket connection with selector for custom
+/// messages.
+/// - stop the WebSocket connection.
+/// - stop the WebSocket connection with abnormal reason.
 pub opaque type Next(state, message) {
   Continue(state: state, selector: option.Option(process.Selector(message)))
   NormalStop
   AbnormalStop(reason: String)
 }
 
+/// Instructs WebSocket connection to continue processing.
 pub fn continue(state: state) -> Next(state, message) {
   Continue(state:, selector: option.None)
 }
 
+/// Instructs WebSocket connection to continue processing, with selector for
+/// custom messages. New selector replaces any existing one that was previously
+/// given.
 pub fn continue_with_selector(
   state: state,
   selector: process.Selector(message),
@@ -36,22 +137,31 @@ pub fn continue_with_selector(
   Continue(state:, selector: option.Some(selector))
 }
 
+/// Instructs WebSocket connection to stop.
 pub fn stop() -> Next(state, message) {
   NormalStop
 }
 
+/// Instructs WebSocket connection to stop with abnormal reason.
 pub fn stop_abnormal(reason: String) -> Next(state, message) {
   AbnormalStop(reason:)
 }
 
+/// A type returned from the initialiser, containing the WebSocket state and a
+/// selector to receive messages with.
+///
+/// Use `initialised` and `selecting` functions to construct this type.
 pub opaque type Initialised(state, message) {
   Initialised(state: state, selector: option.Option(process.Selector(message)))
 }
 
+/// Takes the post-initialisation state. This state will be passed to the
+/// `on_message` callback each time the message is received.
 pub fn initialised(state: state) -> Initialised(state, message) {
   Initialised(state:, selector: option.None)
 }
 
+/// Adds a selector to receive messages with.
 pub fn selecting(
   initialised: Initialised(state, old_message),
   selector: process.Selector(message),
@@ -59,12 +169,17 @@ pub fn selecting(
   Initialised(..initialised, selector: option.Some(selector))
 }
 
+/// Represents a WebSocket message received from the server.
 pub type Message(message) {
+  /// Indicates that text frame has been received.
   Text(String)
+  /// Indicates that binary frame has been received.
   Binary(BitArray)
+  /// Indicates that user message has been received from WebSocket selector.
   User(message)
 }
 
+/// Represents a WebSocket connection between a client and a server.
 pub opaque type Connection {
   Connection(
     transport: socket.Transport,
@@ -73,38 +188,72 @@ pub opaque type Connection {
   )
 }
 
+/// Error codes that can occur during socket operations such as connecting,
+/// sending, or receiving data.
 pub type SocketReason {
+  /// Connection was closed by the remote peer.
   Closed
+  /// Operation exceeded the specified timeout.
   Timeout
+  /// Invalid argument provided to socket operation.
   Badarg
+  /// Process was terminated.
   Terminated
+  /// Address is already in use.
   Eaddrinuse
+  /// Requested address is not available.
   Eaddrnotavail
+  /// Address family is not supported.
   Eafnosupport
+  /// Connection attempt is already in progress.
   Ealready
+  /// Connection was aborted by the system.
   Econnaborted
+  /// Connection was refused by the remote host.
   Econnrefused
+  /// Connection was reset by the remote peer.
   Econnreset
+  /// Destination address is required.
   Edestaddrreq
+  /// Remote host is down.
   Ehostdown
+  /// Remote host is unreachable.
   Ehostunreach
+  /// Operation is currently in progress.
   Einprogress
+  /// Socket is already connected.
   Eisconn
+  /// Message size is too large.
   Emsgsize
+  /// Network is down.
   Enetdown
+  /// Network is unreachable.
   Enetunreach
+  /// Required package is not installed.
   Enopkg
+  /// Protocol option is not available.
   Enoprotoopt
+  /// Socket is not connected.
   Enotconn
+  /// Inappropriate I/O control operation.
   Enotty
+  /// File descriptor is not a socket.
   Enotsock
+  /// Protocol error occurred.
   Eproto
+  /// Protocol is not supported.
   Eprotonosupport
+  /// Protocol type is incorrect for socket.
   Eprototype
+  /// Socket type is not supported.
   Esocktnosupport
+  /// Connection attempt timed out.
   Etimedout
+  /// Operation would block in non-blocking mode.
   Ewouldblock
+  /// Invalid port number.
   Exbadport
+  /// Invalid sequence number.
   Exbadseq
 }
 
@@ -145,21 +294,40 @@ fn to_socket_reason(reason: socket.SocketReason) -> SocketReason {
   }
 }
 
+/// WebSocket close codes that can be sent when closing a connection. The data
+/// parameter allows you to include payload up to 123 bytes in size.
 pub type CloseReason {
+  /// The connection successfully completed its purpose and is closing normally.
   NormalClosure(data: BitArray)
+  /// The endpoint is going away, either due to server shutdown or browser
+  /// navigation.
   GoingAway(data: BitArray)
+  /// A WebSocket protocol violation was detected.
   ProtocolError(data: BitArray)
+  /// The endpoint received data it cannot accept.
   UnsupportedData(data: BitArray)
+  /// The message data doesn’t match the declared type.
   InvalidPayloadData(data: BitArray)
+  /// Generic status for policy violations when no other code applies.
   PolicyViolation(data: BitArray)
+  /// Message exceeds the maximum size the endpoint can handle.
   MessageTooBig(data: BitArray)
+  /// The server encountered an unexpected condition preventing request
+  /// fulfillment.
   MandatoryExtension(data: BitArray)
+  /// The server encountered an unexpected error.
   InternalError(data: BitArray)
+  /// Server is restarting.
   ServiceRestart(data: BitArray)
+  /// Temporary server overload.
   TryAgainLater(data: BitArray)
+  /// Gateway/proxy received invalid response.
   BadGateway(data: BitArray)
+  /// TLS/SSL handshake failure.
   TLSHandshake(data: BitArray)
+  /// Custom close codes for application-specific use cases.
   CustomCloseCode(code: Int, data: BitArray)
+  /// No close reason.
   NoCloseReason
 }
 
@@ -203,6 +371,8 @@ fn to_internal_close_reason(reason: CloseReason) -> websocks.CloseReason {
   }
 }
 
+/// Contains all client configurations, can be adjusted by different builder
+/// functions.
 pub opaque type Builder(body, state, message) {
   Builder(
     request: request.Request(body),
@@ -215,6 +385,10 @@ pub opaque type Builder(body, state, message) {
   )
 }
 
+/// Creates a new builder to set up WebSocket client with default configuration
+/// without a custom initialiser. Use `new_with_initialiser` to create a builder
+/// with some initialisation logic that runs before the client starts handling
+/// messages.
 pub fn new(
   request: request.Request(body),
   state: state,
@@ -229,6 +403,15 @@ pub fn new(
   )
 }
 
+/// Creates a new builder to set up WebSocket client with a custom initialiser
+/// that runs before the client starts handling messages.
+///
+/// The actor's default subject is passed to the initialiser function. You can
+/// use it to send custom messages via `to_user_message` or ignore it
+/// completely.
+///
+/// If a custom selector is given using the `selecting` function, this expands
+/// the default selector to handle custom messages.
 pub fn new_with_initialiser(
   request: request.Request(body),
   initialise: fn(process.Subject(WebsocketMessage(message))) ->
@@ -244,6 +427,9 @@ pub fn new_with_initialiser(
   )
 }
 
+/// Sets the maximum amount of time for the handshake to happen in milliseconds.
+/// The initialiser function also has `timeout + 1000` milliseconds to run.
+/// Default value is `5000`.
 pub fn with_connection_timeout(
   builder: Builder(body, state, message),
   connection_timeout: Int,
@@ -251,6 +437,8 @@ pub fn with_connection_timeout(
   Builder(..builder, connection_timeout:)
 }
 
+/// Provides a name for the client actor to be registered, enabling it to
+/// receive messages via a named subject.
 pub fn named(
   builder: Builder(body, state, message),
   name: process.Name(WebsocketMessage(message)),
@@ -258,6 +446,9 @@ pub fn named(
   Builder(..builder, named: option.Some(name))
 }
 
+/// Sets the message handler for the client. The callback function will be
+/// called each time the client receives a message. It must return an
+/// instruction on how the WebSocket connection should proceed.
 pub fn on_message(
   builder: Builder(body, state, message),
   handler: fn(Connection, state, Message(message)) -> Next(state, message),
@@ -265,6 +456,8 @@ pub fn on_message(
   Builder(..builder, handler:)
 }
 
+/// Sets the handler that is called when the connection is closed. The callback
+/// accepts the last value for the state and the closing reason.
 pub fn on_close(
   builder: Builder(body, state, message),
   on_close: fn(state, CloseReason) -> Nil,
@@ -282,6 +475,9 @@ type WebsocketState(state, message) {
   )
 }
 
+/// Messages received by the underlying actor. This type is exposed so
+/// users are allowed to send custom messages. See `to_user_message` to
+/// construct it.
 pub opaque type WebsocketMessage(message) {
   Packet(BitArray)
   UserMessage(message)
@@ -290,6 +486,8 @@ pub opaque type WebsocketMessage(message) {
   Close
 }
 
+/// Maps custom message to the `WebsocketMessage` opaque type, allowing to send
+/// custom messages to the client's process.
 pub fn to_user_message(message: message) -> WebsocketMessage(message) {
   UserMessage(message)
 }
@@ -334,6 +532,7 @@ const socket_mode = [socket.ActiveMode(socket.Count(100))]
 @external(erlang, "collie_ffi", "coerce_socket_message")
 fn coerce_socket_message(record: dynamic.Dynamic) -> WebsocketMessage(message)
 
+/// Starts the WebSocket connection with the provided configurations.
 pub fn start(
   builder: Builder(body, state, message),
 ) -> Result(
@@ -346,7 +545,7 @@ pub fn start(
   }
 
   let actor =
-    actor.new_with_initialiser(1000, fn(self) {
+    actor.new_with_initialiser(builder.connection_timeout + 1000, fn(self) {
       use #(response, socket, remaining) <- handshake(
         builder.request,
         builder.connection_timeout,
@@ -396,6 +595,7 @@ pub fn start(
   actor.start(actor)
 }
 
+/// Returns a child specification for use in a supervision tree.
 pub fn supervised(
   builder: Builder(body, state, message),
 ) -> supervision.ChildSpecification(process.Subject(WebsocketMessage(message))) {
@@ -707,6 +907,7 @@ fn call_handler(
   }
 }
 
+/// Sends a ping frame to the WebSocket server.
 pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) {
   option.Some(crypto.strong_random_bytes(4))
   |> websocks.encode_ping_frame(data, _)
@@ -715,6 +916,7 @@ pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) 
   |> result.map_error(to_socket_reason)
 }
 
+/// Sends a text frame to the WebSocket server.
 pub fn send_text_frame(
   conn: Connection,
   text: String,
@@ -726,6 +928,7 @@ pub fn send_text_frame(
   |> result.map_error(to_socket_reason)
 }
 
+/// Sends a binary frame to the WebSocket server.
 pub fn send_binary_frame(
   conn: Connection,
   bits: BitArray,
@@ -737,6 +940,9 @@ pub fn send_binary_frame(
   |> result.map_error(to_socket_reason)
 }
 
+/// Sends a close frame to the websocket client. Once this function is called,
+/// no other frames can be sent on this connection. Returns how the WebSocket
+/// connection should proceed - make sure your handler returns this value.
 pub fn send_close_frame(
   conn: Connection,
   reason: CloseReason,
