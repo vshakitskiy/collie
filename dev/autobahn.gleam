@@ -8,6 +8,7 @@ import gleam/list
 import gleam/otp/actor
 import gleam/result
 import gleam/string
+import logging
 import stratus
 
 const base = "http://127.0.0.1:9001"
@@ -25,6 +26,9 @@ const clients = [
 ]
 
 pub fn main() {
+  logging.configure()
+  logging.set_level(logging.Debug)
+
   process.trap_exits(True)
 
   let total_cases = get_case_count()

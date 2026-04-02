@@ -35,6 +35,10 @@
 ////   {
 ////     header: "User messages",
 ////     functions: ["to_user_message"]
+////   },
+////   {
+////     header: "To string",
+////     functions: ["close_reason_to_string", "socket_reason_to_string"]
 ////   }
 //// ]
 ////
@@ -108,6 +112,7 @@ import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
+import logging
 import websocks
 
 /// Represents an instruction on how WebSocket connection should proceed.
@@ -294,6 +299,44 @@ fn to_socket_reason(reason: socket.SocketReason) -> SocketReason {
   }
 }
 
+/// Converts a socket error to a human-readable string.
+pub fn socket_reason_to_string(reason: SocketReason) -> String {
+  case reason {
+    Closed -> "connection closed"
+    Timeout -> "operation timed out"
+    Badarg -> "bad argument"
+    Terminated -> "process terminated"
+    Eaddrinuse -> "address already in use"
+    Eaddrnotavail -> "address not available"
+    Eafnosupport -> "address family not supported"
+    Ealready -> "operation already in progress"
+    Econnaborted -> "connection aborted"
+    Econnrefused -> "connection refused"
+    Econnreset -> "connection reset by peer"
+    Edestaddrreq -> "destination address required"
+    Ehostdown -> "host is down"
+    Ehostunreach -> "host is unreachable"
+    Einprogress -> "operation in progress"
+    Eisconn -> "already connected"
+    Emsgsize -> "message too long"
+    Enetdown -> "network is down"
+    Enetunreach -> "network is unreachable"
+    Enopkg -> "package not installed"
+    Enoprotoopt -> "protocol not available"
+    Enotconn -> "not connected"
+    Enotty -> "inappropriate ioctl for device"
+    Enotsock -> "not a socket"
+    Eproto -> "protocol error"
+    Eprotonosupport -> "protocol not supported"
+    Eprototype -> "wrong protocol type for socket"
+    Esocktnosupport -> "socket type not supported"
+    Etimedout -> "connection timed out"
+    Ewouldblock -> "operation would block"
+    Exbadport -> "bad port"
+    Exbadseq -> "bad sequence"
+  }
+}
+
 /// WebSocket close codes that can be sent when closing a connection. The data
 /// parameter allows you to include payload up to 123 bytes in size.
 pub type CloseReason {
@@ -368,6 +411,27 @@ fn to_internal_close_reason(reason: CloseReason) -> websocks.CloseReason {
     TLSHandshake(data:) -> websocks.TLSHandshake(data:)
     CustomCloseCode(code:, data:) -> websocks.CustomCloseCode(code:, data:)
     NoCloseReason -> websocks.NoCloseReason
+  }
+}
+
+/// Converts a close reason to a human-readable string.
+pub fn close_reason_to_string(reason: CloseReason) -> String {
+  case reason {
+    NormalClosure(_) -> "normal closure"
+    GoingAway(_) -> "going away"
+    ProtocolError(_) -> "protocol error"
+    UnsupportedData(_) -> "unsupported data"
+    InvalidPayloadData(_) -> "invalid payload data"
+    PolicyViolation(_) -> "policy violation"
+    MessageTooBig(_) -> "message too big"
+    MandatoryExtension(_) -> "mandatory extension"
+    InternalError(_) -> "internal error"
+    ServiceRestart(_) -> "service restart"
+    TryAgainLater(_) -> "try again later"
+    BadGateway(_) -> "bad gateway"
+    TLSHandshake(_) -> "TLS handshake failure"
+    CustomCloseCode(code, _) -> "custom close code " <> int.to_string(code)
+    NoCloseReason -> "no close reason"
   }
 }
 
@@ -552,6 +616,8 @@ pub fn start(
         transport,
       )
 
+      logging.log(logging.Debug, "WebSocket handshake completed successfully")
+
       case remaining {
         <<>> -> Nil
         remaining -> actor.send(self, Packet(remaining))
@@ -565,10 +631,18 @@ pub fn start(
         |> result.unwrap([])
         |> list.map(string.trim)
 
+      logging.log(logging.Debug, "Calling initialiser function")
       use Initialised(state, selector) <- result.try(builder.initialise(self))
+      logging.log(logging.Debug, "Initialiser returned successfully")
 
       let compression = case websocks.has_deflate(extensions) {
-        True -> option.Some(websocks.get_compression_extensions(extensions))
+        True -> {
+          logging.log(
+            logging.Debug,
+            "Using permessage-deflate for the WebSocket connection",
+          )
+          option.Some(websocks.get_compression_extensions(extensions))
+        }
         False -> option.None
       }
       let context = websocks.create_context(compression, websocks.Client)
@@ -613,7 +687,7 @@ fn handshake(
     socket.Ssl -> #(
       [
         socket.Cacerts(socket.get_system_cacerts()),
-        socket.ServerNameIndication(socket.get_custom_hostname_check()),
+        socket.CustomizeHostnameCheck(socket.get_custom_hostname_check()),
       ],
       443,
     )
@@ -635,14 +709,26 @@ fn handshake(
     Ok(#(response, remaining)) -> {
       case response.status {
         101 -> handle_response(#(response, socket, remaining))
-        status ->
-          { "Websocket handshake failed with status " <> int.to_string(status) }
-          |> Error
+        status -> {
+          let message =
+            "WebSocket handshake failed with status " <> int.to_string(status)
+          logging.log(logging.Error, message)
+          Error(message)
+        }
       }
     }
-    Error(http_.SocketFailed(reason)) -> reason_to_string(reason)
-    Error(http_.MalformedRequest) ->
-      Error("WebSocket handshake failed due to malformed request")
+    Error(http_.SocketFailed(reason)) -> {
+      let message =
+        "WebSocket handshake failed due to socket: "
+        <> socket.reason_to_string(reason)
+      logging.log(logging.Error, message)
+      Error(message)
+    }
+    Error(http_.MalformedRequest) -> {
+      let message = "WebSocket handshake failed due to malformed request"
+      logging.log(logging.Error, message)
+      Error(message)
+    }
   }
 }
 
@@ -652,15 +738,14 @@ fn unwrap_socket(
 ) -> Result(continue, String) {
   case result {
     Ok(return) -> handle_return(return)
-    Error(reason) -> reason_to_string(reason)
+    Error(reason) -> {
+      let message =
+        "Websocket handshake failed due to socket: "
+        <> socket.reason_to_string(reason)
+      logging.log(logging.Error, message)
+      Error(message)
+    }
   }
-}
-
-fn reason_to_string(reason: socket.SocketReason) -> Result(a, String) {
-  Error(
-    "Websocket handshake failed due to socket: "
-    <> socket.reason_to_string(reason),
-  )
 }
 
 fn handle_message(
@@ -671,6 +756,7 @@ fn handle_message(
     Packet(data) -> handle_packet(data, state)
 
     UserMessage(message) -> {
+      logging.log(logging.Debug, "Received user message from selector")
       let resolved = call_handler(new_resolve_state(state), User(message))
       resolve_next(resolved.state, state)
     }
@@ -681,6 +767,7 @@ fn handle_message(
         Ok(Nil) -> actor.continue(state)
         Error(reason) -> {
           let reason = socket.reason_to_string(reason)
+          logging.log(logging.Error, "Failed to set socket options: " <> reason)
 
           InternalError(bit_array.from_string(reason))
           |> handle_close(state, _, option.Some(reason))
@@ -690,11 +777,15 @@ fn handle_message(
 
     SocketError(reason) -> {
       let reason = socket.reason_to_string(reason)
+      logging.log(logging.Error, "Socket error: " <> reason)
 
       InternalError(bit_array.from_string(reason))
       |> handle_close(state, _, option.Some(reason))
     }
-    Close -> handle_close(state, NoCloseReason, option.None)
+    Close -> {
+      logging.log(logging.Debug, "Socket closed by remote peer")
+      handle_close(state, NoCloseReason, option.None)
+    }
   }
 }
 
@@ -764,6 +855,7 @@ fn handle_packet(
         )
       }
 
+      logging.log(logging.Warning, "Protocol violation: " <> reason)
       handle_close(state, variant(<<reason:utf8>>), option.Some(reason))
     }
   }
@@ -800,13 +892,24 @@ fn handle_close(
   reason: CloseReason,
   abnormal: option.Option(String),
 ) {
+  let stop = case abnormal {
+    option.Some(reason) -> {
+      logging.log(logging.Warning, "Closing connection abnormally: " <> reason)
+      actor.stop_abnormal(reason)
+    }
+    option.None -> {
+      logging.log(
+        logging.Debug,
+        "Closing connection: " <> close_reason_to_string(reason),
+      )
+      actor.stop()
+    }
+  }
+
   websocks.close_context(state.context)
   state.on_close(state.user, reason)
 
-  case abnormal {
-    option.Some(reason) -> actor.stop_abnormal(reason)
-    option.None -> actor.stop()
-  }
+  stop
 }
 
 fn handle_frame(
@@ -819,8 +922,10 @@ fn handle_frame(
 
   case frame {
     websocks.Control(websocks.Ping(payload)) -> {
+      logging.log(logging.Debug, "Received ping frame")
       case bit_array.byte_size(payload) {
         size if size > 125 -> {
+          logging.log(logging.Warning, "Ping payload exceeds 125 bytes")
           let next = AbnormalStop("control frame payload exceeds 125 octets")
           let reason =
             ProtocolError(<<"control frame payload exceeds 125 octets">>)
@@ -835,10 +940,14 @@ fn handle_frame(
             |> bytes_tree.from_bit_array
 
           case socket.send(state.conn.transport, state.conn.socket, pong) {
-            Ok(Nil) -> websocks.Continue(state)
+            Ok(Nil) -> {
+              logging.log(logging.Debug, "Sent pong frame")
+              websocks.Continue(state)
+            }
             Error(reason) -> {
               let reason =
                 "failed to send pong: " <> socket.reason_to_string(reason)
+              logging.log(logging.Error, reason)
               let next = AbnormalStop(reason)
               let reason = option.Some(InternalError(<<reason:utf8>>))
 
@@ -850,6 +959,12 @@ fn handle_frame(
     }
 
     websocks.Control(websocks.Close(reason)) -> {
+      logging.log(
+        logging.Debug,
+        "Received close frame: "
+          <> close_reason_to_string(to_close_reason(reason)),
+      )
+
       let _sent =
         option.Some(crypto.strong_random_bytes(4))
         |> websocks.encode_close_frame(reason:)
@@ -860,10 +975,14 @@ fn handle_frame(
       websocks.Stop(ResolveState(..state, next: NormalStop, reason:))
     }
 
-    websocks.Control(websocks.Pong(_)) -> websocks.Continue(state)
+    websocks.Control(websocks.Pong(_)) -> {
+      logging.log(logging.Debug, "Received pong frame")
+      websocks.Continue(state)
+    }
 
     websocks.Text(payload) ->
       call_handler(state, Text(unsafe_to_string(payload)))
+
     websocks.Binary(payload) -> call_handler(state, Binary(payload))
 
     websocks.Continuation(_) -> websocks.Continue(state)
@@ -899,6 +1018,7 @@ fn call_handler(
         exception.Exited(_dynamic) ->
           "A process exited in the handler. This can be caused by calling the erlang:exit/1 function."
       }
+      logging.log(logging.Error, "Handler exception: " <> reason)
       let next = AbnormalStop(reason)
       let reason = option.Some(InternalError(<<reason:utf8>>))
 

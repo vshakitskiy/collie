@@ -30,6 +30,8 @@ to_erl_option({active_mode, active}) ->
   {active, true};
 to_erl_option({active_mode, {count, N}}) ->
   {active, N};
+to_erl_option({mode, binary}) ->
+  binary;
 to_erl_option(Other) ->
   Other.
 
