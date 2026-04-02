@@ -11,6 +11,12 @@ A WebSocket client for Gleam.
 gleam add collie@1
 ```
 
+## Autobahn
+
+Collie passes all Autobahn WebSocket test suite cases, ensuring full compliance with the WebSocket protocol specification. You can view detailed test results and compare them with other Gleam WebSocket implementations like Stratus at:
+
+**[https://vshakitskiy.github.io/collie](https://vshakitskiy.github.io/collie)**
+
 ## Usage
 
 ### Basic Client

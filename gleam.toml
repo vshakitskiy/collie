@@ -1,7 +1,7 @@
 name = "collie"
 version = "1.0.0"
 licences = ["Apache-2.0"]
-description = "Websocket client in Gleam"
+description = "🐕 Websocket client in Gleam"
 target = "erlang"
 repository = { type = "github", user = "vshakitskiy", repo = "collie" }
 
