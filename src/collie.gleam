@@ -331,7 +331,7 @@ type SelectRecord {
 
 const socket_mode = [socket.ActiveMode(socket.Count(100))]
 
-@external(erlang, "socktopus_ffi", "coerce_socket_message")
+@external(erlang, "collie_ffi", "coerce_socket_message")
 fn coerce_socket_message(record: dynamic.Dynamic) -> WebsocketMessage(message)
 
 pub fn start(

@@ -1,3 +1,4 @@
+import collie
 import gleam/erlang/process
 import gleam/function
 import gleam/http/request
@@ -6,7 +7,6 @@ import gleam/io
 import gleam/list
 import gleam/otp/actor
 import gleam/result
-import socktopus
 import stratus
 
 const base = "http://127.0.0.1:9001"
@@ -16,12 +16,13 @@ type Adapter {
 }
 
 const clients = [
-  Adapter(agent: "socktopus", runner: socktopus_adapter),
+  Adapter(agent: "collie", runner: collie_adapter),
   Adapter(agent: "stratus", runner: stratus_adapter),
 ]
 
 pub fn main() {
   process.trap_exits(True)
+
   let case_count = get_case_count()
 
   { "Running " <> int.to_string(case_count) <> " autobahn test cases\n" }
@@ -37,17 +38,17 @@ fn get_case_count() -> Int {
 
   let result = process.new_subject()
   let assert Ok(actor.Started(pid:, ..)) =
-    socktopus.new(req, Nil)
-    |> socktopus.on_message(fn(_conn, state, message) {
+    collie.new(req, Nil)
+    |> collie.on_message(fn(_conn, state, message) {
       case message {
-        socktopus.Text(count) -> {
+        collie.Text(count) -> {
           process.send(result, count)
-          socktopus.continue(state)
+          collie.continue(state)
         }
-        _ -> socktopus.continue(state)
+        _ -> collie.continue(state)
       }
     })
-    |> socktopus.start
+    |> collie.start
 
   let monitor = process.monitor(pid)
   let selector =
@@ -87,27 +88,26 @@ fn handle_adapters(client: Adapter, case_count: Int) -> Nil {
   io.println("Reports updated for " <> client.agent <> "\n")
 }
 
-fn socktopus_adapter(case_number: Int) -> Result(Nil, String) {
-  let path =
-    "/runCase?case=" <> int.to_string(case_number) <> "&agent=socktopus"
+fn collie_adapter(case_number: Int) -> Result(Nil, String) {
+  let path = "/runCase?case=" <> int.to_string(case_number) <> "&agent=collie"
   let assert Ok(req) = request.to(base <> path)
 
   let started =
-    socktopus.new(req, Nil)
-    |> socktopus.on_message(fn(conn, state, message) {
+    collie.new(req, Nil)
+    |> collie.on_message(fn(conn, state, message) {
       case message {
-        socktopus.Text(text) -> {
-          let _ = socktopus.send_text_frame(conn, text)
-          socktopus.continue(state)
+        collie.Text(text) -> {
+          let _ = collie.send_text_frame(conn, text)
+          collie.continue(state)
         }
-        socktopus.Binary(data) -> {
-          let _ = socktopus.send_binary_frame(conn, data)
-          socktopus.continue(state)
+        collie.Binary(data) -> {
+          let _ = collie.send_binary_frame(conn, data)
+          collie.continue(state)
         }
-        socktopus.User(_) -> socktopus.continue(state)
+        collie.User(_) -> collie.continue(state)
       }
     })
-    |> socktopus.start
+    |> collie.start
 
   case started {
     Ok(actor.Started(pid:, ..)) -> {
@@ -161,14 +161,11 @@ fn stratus_adapter(case_number: Int) -> Result(Nil, String) {
 fn update_reports(agent: String) -> Nil {
   let assert Ok(req) = request.to(base <> "/updateReports?agent=" <> agent)
 
-  let assert Ok(actor.Started(pid:, ..)) =
-    socktopus.new(req, Nil) |> socktopus.start
+  let assert Ok(actor.Started(pid:, ..)) = collie.new(req, Nil) |> collie.start
 
   let monitor = process.monitor(pid)
   let selector =
     process.new_selector()
-    |> process.select_specific_monitor(monitor, function.identity)
+    |> process.select_specific_monitor(monitor, fn(_down) { Nil })
   process.selector_receive_forever(selector)
-
-  Nil
 }

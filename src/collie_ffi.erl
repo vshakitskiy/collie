@@ -1,4 +1,4 @@
--module(socktopus_ffi).
+-module(collie_ffi).
 
 -export([coerce_socket_message/1, to_erl_options/1, tcp_send/2, tcp_close/1,
          tcp_shutdown/2, tcp_set_opts/2, tcp_controlling_process/2, ssl_send/2, ssl_close/1,

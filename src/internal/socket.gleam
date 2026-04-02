@@ -136,7 +136,7 @@ pub const default_options = [
 ]
 
 /// Convert options to Erlang-native format.
-@external(erlang, "socktopus_ffi", "to_erl_options")
+@external(erlang, "collie_ffi", "to_erl_options")
 pub fn to_erl_options(options: List(Option)) -> List(ErlangOption)
 
 /// Retrieve system CA certificates for TLS.
@@ -144,7 +144,7 @@ pub fn to_erl_options(options: List(Option)) -> List(ErlangOption)
 pub fn get_system_cacerts() -> dynamic.Dynamic
 
 /// Get the HTTPS hostname verification match function.
-@external(erlang, "socktopus_ffi", "custom_sni_matcher")
+@external(erlang, "collie_ffi", "custom_sni_matcher")
 pub fn get_custom_hostname_check() -> dynamic.Dynamic
 
 /// Transport protocol.
@@ -258,7 +258,7 @@ fn tcp_connect(
   timeout: Int,
 ) -> Result(Socket, SocketReason)
 
-@external(erlang, "socktopus_ffi", "tcp_send")
+@external(erlang, "collie_ffi", "tcp_send")
 fn tcp_send(
   socket: Socket,
   packet: bytes_tree.BytesTree,
@@ -274,19 +274,19 @@ fn tcp_receive_timeout(
   timeout: Int,
 ) -> Result(BitArray, SocketReason)
 
-@external(erlang, "socktopus_ffi", "tcp_close")
+@external(erlang, "collie_ffi", "tcp_close")
 fn tcp_close(socket: Socket) -> Result(Nil, SocketReason)
 
-@external(erlang, "socktopus_ffi", "tcp_shutdown")
+@external(erlang, "collie_ffi", "tcp_shutdown")
 fn tcp_shutdown(socket: Socket, how: Shutdown) -> Result(Nil, SocketReason)
 
-@external(erlang, "socktopus_ffi", "tcp_set_opts")
+@external(erlang, "collie_ffi", "tcp_set_opts")
 fn tcp_set_opts(
   socket: Socket,
   opts: List(ErlangOption),
 ) -> Result(Nil, SocketReason)
 
-@external(erlang, "socktopus_ffi", "tcp_controlling_process")
+@external(erlang, "collie_ffi", "tcp_controlling_process")
 fn tcp_controlling_process(
   socket: Socket,
   new_owner: process.Pid,
@@ -300,7 +300,7 @@ fn ssl_connect(
   timeout: Int,
 ) -> Result(Socket, SocketReason)
 
-@external(erlang, "socktopus_ffi", "ssl_send")
+@external(erlang, "collie_ffi", "ssl_send")
 fn ssl_send(
   socket: Socket,
   packet: bytes_tree.BytesTree,
@@ -316,19 +316,19 @@ fn ssl_receive_timeout(
   timeout: Int,
 ) -> Result(BitArray, SocketReason)
 
-@external(erlang, "socktopus_ffi", "ssl_close")
+@external(erlang, "collie_ffi", "ssl_close")
 fn ssl_close(socket: Socket) -> Result(Nil, SocketReason)
 
-@external(erlang, "socktopus_ffi", "ssl_shutdown")
+@external(erlang, "collie_ffi", "ssl_shutdown")
 fn ssl_shutdown(socket: Socket, how: Shutdown) -> Result(Nil, SocketReason)
 
-@external(erlang, "socktopus_ffi", "ssl_set_opts")
+@external(erlang, "collie_ffi", "ssl_set_opts")
 fn ssl_set_opts(
   socket: Socket,
   opts: List(ErlangOption),
 ) -> Result(Nil, SocketReason)
 
-@external(erlang, "socktopus_ffi", "ssl_controlling_process")
+@external(erlang, "collie_ffi", "ssl_controlling_process")
 fn ssl_controlling_process(
   socket: Socket,
   new_owner: process.Pid,
