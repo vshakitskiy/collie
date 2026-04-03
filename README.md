@@ -2,7 +2,7 @@
 
 A WebSocket client for Gleam.
 
-[![Package Version](https://img.shields.io/hexpm/v/websocket)](https://hex.pm/packages/collie)
+[![Package Version](https://img.shields.io/hexpm/v/collie)](https://hex.pm/packages/collie)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/collie/)
 
 ## Installation
