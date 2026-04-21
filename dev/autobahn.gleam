@@ -22,7 +22,7 @@ type Client {
 
 const clients = [
   Client(agent: "collie@1", runner: collie_adapter),
-  Client(agent: "stratus@2", runner: stratus_adapter),
+  Client(agent: "stratus@3", runner: stratus_adapter),
 ]
 
 pub fn main() {
@@ -156,15 +156,6 @@ fn stratus_adapter(req: request.Request(String)) -> Result(Nil, String) {
     }
   })
   |> stratus.start
-  |> result.map_error(fn(error) {
-    case error {
-      stratus.ActorFailed(error) -> error
-      stratus.HandshakeFailed(error) ->
-        actor.InitFailed("handshake failed: " <> string.inspect(error))
-      stratus.FailedToTransferSocket(error) ->
-        actor.InitFailed("socket error: " <> string.inspect(error))
-    }
-  })
   |> handle_started
 }
 
