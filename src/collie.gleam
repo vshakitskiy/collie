@@ -13,11 +13,11 @@
 ////   },
 ////   {
 ////     header: "Initialiser",
-////     functions: ["initialised", "selecting"]
+////     functions: ["initialised", "selecting", "returning"]
 ////   },
 ////   {
-////     header: "Client",
-////     functions: ["start", "supervised"]
+////     header: "Start",
+////     functions: ["start", "supervised", "factory"]
 ////   },
 ////   {
 ////     header: "Handler",
@@ -109,6 +109,7 @@ import gleam/int
 import gleam/list
 import gleam/option
 import gleam/otp/actor
+import gleam/otp/factory_supervisor as factory
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
@@ -155,26 +156,39 @@ pub fn stop_abnormal(reason: String) -> Next(state, message) {
 /// A type returned from the initialiser, containing the WebSocket state and a
 /// selector to receive messages with.
 ///
-/// Use `initialised` and `selecting` functions to construct this type.
-pub opaque type Initialised(state, message) {
-  Initialised(state: state, selector: option.Option(process.Selector(message)))
+/// Use `initialised`, `selecting` and `returning` functions to construct this 
+/// type.
+pub opaque type Initialised(state, message, return) {
+  Initialised(
+    state: state,
+    selector: option.Option(process.Selector(message)),
+    return: return,
+  )
 }
 
 /// Takes the post-initialisation state. This state will be passed to the
 /// `on_message` callback each time the message is received.
-pub fn initialised(state: state) -> Initialised(state, message) {
-  Initialised(state:, selector: option.None)
+pub fn initialised(state: state) -> Initialised(state, message, Nil) {
+  Initialised(state:, selector: option.None, return: Nil)
 }
 
 /// Adds a selector to receive messages with.
 pub fn selecting(
-  initialised: Initialised(state, old_message),
+  initialised: Initialised(state, old_message, return),
   selector: process.Selector(message),
-) -> Initialised(state, message) {
+) -> Initialised(state, message, return) {
   Initialised(..initialised, selector: option.Some(selector))
 }
 
-/// Represents a WebSocket message received from the server.
+/// Adds the data to return to the parent process.
+pub fn returning(
+  initialised: Initialised(state, message, old_return),
+  return: return,
+) -> Initialised(state, message, return) {
+  Initialised(..initialised, return:)
+}
+
+/// Represents a message the websocket actor can receive.
 pub type Message(message) {
   /// Indicates that text frame has been received.
   Text(String)
@@ -437,13 +451,13 @@ pub fn close_reason_to_string(reason: CloseReason) -> String {
 
 /// Contains all client configurations, can be adjusted by different builder
 /// functions.
-pub opaque type Builder(body, state, message) {
+pub opaque type Builder(body, state, message, return) {
   Builder(
     request: request.Request(body),
     named: option.Option(process.Name(WebsocketMessage(message))),
     connection_timeout: Int,
     initialise: fn(process.Subject(WebsocketMessage(message))) ->
-      Result(Initialised(state, message), String),
+      Result(Initialised(state, message, return), String),
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, CloseReason) -> Nil,
   )
@@ -456,12 +470,12 @@ pub opaque type Builder(body, state, message) {
 pub fn new(
   request: request.Request(body),
   state: state,
-) -> Builder(body, state, message) {
+) -> Builder(body, state, message, process.Subject(WebsocketMessage(message))) {
   Builder(
     request:,
     named: option.None,
     connection_timeout: 5000,
-    initialise: fn(_self) { Ok(initialised(state)) },
+    initialise: fn(self) { initialised(state) |> returning(self) |> Ok },
     handler: fn(_conn, state, _message) { continue(state) },
     on_close: fn(_state, _reason) { Nil },
   )
@@ -479,8 +493,8 @@ pub fn new(
 pub fn new_with_initialiser(
   request: request.Request(body),
   initialise: fn(process.Subject(WebsocketMessage(message))) ->
-    Result(Initialised(state, message), String),
-) -> Builder(body, state, message) {
+    Result(Initialised(state, message, return), String),
+) -> Builder(body, state, message, return) {
   Builder(
     request:,
     named: option.None,
@@ -495,18 +509,18 @@ pub fn new_with_initialiser(
 /// The initialiser function also has `timeout + 1000` milliseconds to run.
 /// Default value is `5000`.
 pub fn with_connection_timeout(
-  builder: Builder(body, state, message),
+  builder: Builder(body, state, message, return),
   connection_timeout: Int,
-) -> Builder(body, state, message) {
+) -> Builder(body, state, message, return) {
   Builder(..builder, connection_timeout:)
 }
 
 /// Provides a name for the client actor to be registered, enabling it to
 /// receive messages via a named subject.
 pub fn named(
-  builder: Builder(body, state, message),
+  builder: Builder(body, state, message, return),
   name: process.Name(WebsocketMessage(message)),
-) -> Builder(body, state, message) {
+) -> Builder(body, state, message, return) {
   Builder(..builder, named: option.Some(name))
 }
 
@@ -514,18 +528,18 @@ pub fn named(
 /// called each time the client receives a message. It must return an
 /// instruction on how the WebSocket connection should proceed.
 pub fn on_message(
-  builder: Builder(body, state, message),
+  builder: Builder(body, state, message, return),
   handler: fn(Connection, state, Message(message)) -> Next(state, message),
-) -> Builder(body, state, message) {
+) -> Builder(body, state, message, return) {
   Builder(..builder, handler:)
 }
 
 /// Sets the handler that is called when the connection is closed. The callback
 /// accepts the last value for the state and the closing reason.
 pub fn on_close(
-  builder: Builder(body, state, message),
+  builder: Builder(body, state, message, return),
   on_close: fn(state, CloseReason) -> Nil,
-) -> Builder(body, state, message) {
+) -> Builder(body, state, message, return) {
   Builder(..builder, on_close:)
 }
 
@@ -598,11 +612,8 @@ fn coerce_socket_message(record: dynamic.Dynamic) -> WebsocketMessage(message)
 
 /// Starts the WebSocket connection with the provided configurations.
 pub fn start(
-  builder: Builder(body, state, message),
-) -> Result(
-  actor.Started(process.Subject(WebsocketMessage(message))),
-  actor.StartError,
-) {
+  builder: Builder(body, state, message, return),
+) -> Result(actor.Started(return), actor.StartError) {
   let transport = case builder.request.scheme {
     http.Https -> socket.Ssl
     http.Http -> socket.Tcp
@@ -632,7 +643,9 @@ pub fn start(
         |> list.map(string.trim)
 
       logging.log(logging.Debug, "Calling initialiser function")
-      use Initialised(state, selector) <- result.try(builder.initialise(self))
+      use Initialised(state, selector, return) <- result.try(builder.initialise(
+        self,
+      ))
       logging.log(logging.Debug, "Initialiser returned successfully")
 
       let compression = case websocks.has_deflate(extensions) {
@@ -656,7 +669,7 @@ pub fn start(
       )
       |> actor.initialised
       |> actor.selecting(create_socket_selector(self, selector))
-      |> actor.returning(self)
+      |> actor.returning(return)
       |> Ok
     })
     |> actor.on_message(handle_message)
@@ -671,9 +684,17 @@ pub fn start(
 
 /// Returns a child specification for use in a supervision tree.
 pub fn supervised(
-  builder: Builder(body, state, message),
-) -> supervision.ChildSpecification(process.Subject(WebsocketMessage(message))) {
+  builder: Builder(body, state, message, return),
+) -> supervision.ChildSpecification(return) {
   supervision.supervisor(fn() { start(builder) })
+}
+
+/// Returns a factory supervisor builder for dynamically starting WebSocket 
+/// connections.
+pub fn factory(
+  build: fn(start_args) -> Builder(body, state, message, return),
+) -> factory.Builder(start_args, return) {
+  factory.worker_child(fn(args) { start(build(args)) })
 }
 
 fn handshake(
@@ -1028,7 +1049,10 @@ fn call_handler(
 }
 
 /// Sends a ping frame to the WebSocket server.
-pub fn send_ping(conn: Connection, data: BitArray) -> Result(Nil, SocketReason) {
+pub fn send_ping(
+  conn: Connection,
+  data: BitArray,
+) -> Result(Nil, SocketReason) {
   option.Some(crypto.strong_random_bytes(4))
   |> websocks.encode_ping_frame(data, _)
   |> bytes_tree.from_bit_array
@@ -1060,24 +1084,15 @@ pub fn send_binary_frame(
   |> result.map_error(to_socket_reason)
 }
 
-/// Sends a close frame to the websocket client. Once this function is called,
-/// no other frames can be sent on this connection. Returns how the WebSocket
-/// connection should proceed - make sure your handler returns this value.
+/// Sends a close frame to the WebSocket server. Once called, no other frames 
+/// can be sent on this connection. Stop the actor after calling this.
 pub fn send_close_frame(
   conn: Connection,
   reason: CloseReason,
-) -> Next(state, message) {
-  let sent =
-    to_internal_close_reason(reason)
-    |> websocks.encode_close_frame(option.Some(crypto.strong_random_bytes(4)))
-    |> bytes_tree.from_bit_array()
-    |> socket.send(conn.transport, conn.socket, _)
-
-  case sent {
-    Ok(Nil) -> NormalStop
-    Error(reason) -> {
-      let reason = socket.reason_to_string(reason)
-      AbnormalStop("Errored while trying to send close frame: " <> reason)
-    }
-  }
+) -> Result(Nil, SocketReason) {
+  to_internal_close_reason(reason)
+  |> websocks.encode_close_frame(option.Some(crypto.strong_random_bytes(4)))
+  |> bytes_tree.from_bit_array
+  |> socket.send(conn.transport, conn.socket, _)
+  |> result.map_error(to_socket_reason)
 }
