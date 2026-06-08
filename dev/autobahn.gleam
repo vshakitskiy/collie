@@ -21,7 +21,7 @@ type Client {
 }
 
 const clients = [
-  Client(agent: "collie@1", runner: collie_adapter),
+  Client(agent: "collie", runner: collie_adapter),
   Client(agent: "stratus@3", runner: stratus_adapter),
 ]
 

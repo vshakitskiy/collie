@@ -1,4 +1,4 @@
-# Unreleased
+# v2.0.0 - 08.06.2026
 
 - Add `returning` to return custom data on initialisation
 - Change documentation line for `Message` type

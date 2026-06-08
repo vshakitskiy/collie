@@ -206,7 +206,10 @@ pub fn receive_timeout(
 }
 
 /// Close the socket.
-pub fn close(transport: Transport, socket: Socket) -> Result(Nil, SocketReason) {
+pub fn close(
+  transport: Transport,
+  socket: Socket,
+) -> Result(Nil, SocketReason) {
   case transport {
     Tcp -> tcp_close(socket)
     Ssl -> ssl_close(socket)

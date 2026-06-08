@@ -10,7 +10,9 @@ import gleam/result
 import gleam/string
 import websocks
 
-pub fn construct_upgrade(request: request.Request(body)) -> bytes_tree.BytesTree {
+pub fn construct_upgrade(
+  request: request.Request(body),
+) -> bytes_tree.BytesTree {
   let headers =
     list.fold(request.headers, "", fn(acc, pair) {
       let #(key, value) = pair

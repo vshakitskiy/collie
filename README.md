@@ -8,7 +8,7 @@ A WebSocket client for Gleam.
 ## Installation
 
 ```sh
-gleam add collie@1
+gleam add collie@2
 ```
 
 ## Autobahn
@@ -181,7 +181,7 @@ pub fn main() {
   let assert Ok(req) = request.to("https://echo.websocket.org")
 
   let assert Ok(_client) =
-    collie.new_with_initialiser(req, fn(_self) {
+    collie.new_with_initialiser(req, fn(self) {
       // Spawn a timer process
       let timer = process.new_subject()
       process.spawn(fn() { timer_loop(timer) })
@@ -191,10 +191,11 @@ pub fn main() {
         process.new_selector()
         |> process.select(timer)
 
-      // Return state with the selector
+      // Return state with the selector and return self subject
       let state = State(timer:)
       collie.initialised(state)
       |> collie.selecting(selector)
+      |> collie.returning(self)
       |> Ok
     })
     |> collie.on_message(handle_message)
