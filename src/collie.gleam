@@ -686,7 +686,7 @@ pub fn start(
 pub fn supervised(
   builder: Builder(body, state, message, return),
 ) -> supervision.ChildSpecification(return) {
-  supervision.supervisor(fn() { start(builder) })
+  supervision.worker(fn() { start(builder) })
 }
 
 /// Returns a factory supervisor builder for dynamically starting WebSocket 

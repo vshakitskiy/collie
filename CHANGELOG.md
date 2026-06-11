@@ -1,3 +1,7 @@
+# v2.0.1 - 11.06.2026
+
+- Fix a bug with `supervised` using `supervisor` function instead of a `worker`
+
 # v2.0.0 - 08.06.2026
 
 - Add `returning` to return custom data on initialisation
