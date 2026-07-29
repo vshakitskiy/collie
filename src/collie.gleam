@@ -6,6 +6,7 @@
 ////       "new",
 ////       "new_with_initialiser",
 ////       "with_connection_timeout",
+////       "with_limits",
 ////       "named",
 ////       "on_message",
 ////       "on_close"
@@ -38,7 +39,11 @@
 ////   },
 ////   {
 ////     header: "To string",
-////     functions: ["close_reason_to_string", "socket_reason_to_string"]
+////     functions: [
+////       "close_code_to_string",
+////       "close_reason_to_string",
+////       "socket_reason_to_string"
+////     ]
 ////   }
 //// ]
 ////
@@ -96,7 +101,6 @@
 import collie/internal/http as http_
 import collie/internal/socket
 import exception
-import gleam/bit_array
 import gleam/bytes_tree
 import gleam/crypto
 import gleam/dynamic
@@ -112,7 +116,6 @@ import gleam/otp/actor
 import gleam/otp/factory_supervisor as factory
 import gleam/otp/supervision
 import gleam/result
-import gleam/string
 import logging
 import websocks
 
@@ -351,103 +354,149 @@ pub fn socket_reason_to_string(reason: SocketReason) -> String {
   }
 }
 
-/// WebSocket close codes that can be sent when closing a connection. The data
-/// parameter allows you to include payload up to 123 bytes in size.
-pub type CloseReason {
+/// WebSocket status codes that may appear in a close frame.
+///
+/// The codes reserved for local use only, such as 1005, 1006 and 1015, are
+/// absent. They must never be sent, and receiving one is a protocol violation.
+pub type CloseCode {
   /// The connection successfully completed its purpose and is closing normally.
-  NormalClosure(data: BitArray)
+  NormalClosure
   /// The endpoint is going away, either due to server shutdown or browser
   /// navigation.
-  GoingAway(data: BitArray)
+  GoingAway
   /// A WebSocket protocol violation was detected.
-  ProtocolError(data: BitArray)
+  ProtocolError
   /// The endpoint received data it cannot accept.
-  UnsupportedData(data: BitArray)
+  UnsupportedData
   /// The message data doesn’t match the declared type.
-  InvalidPayloadData(data: BitArray)
+  InvalidPayloadData
   /// Generic status for policy violations when no other code applies.
-  PolicyViolation(data: BitArray)
+  PolicyViolation
   /// Message exceeds the maximum size the endpoint can handle.
-  MessageTooBig(data: BitArray)
+  MessageTooBig
   /// The server encountered an unexpected condition preventing request
   /// fulfillment.
-  MandatoryExtension(data: BitArray)
+  MandatoryExtension
   /// The server encountered an unexpected error.
-  InternalError(data: BitArray)
+  InternalError
   /// Server is restarting.
-  ServiceRestart(data: BitArray)
+  ServiceRestart
   /// Temporary server overload.
-  TryAgainLater(data: BitArray)
+  TryAgainLater
   /// Gateway/proxy received invalid response.
-  BadGateway(data: BitArray)
-  /// TLS/SSL handshake failure.
-  TLSHandshake(data: BitArray)
-  /// Custom close codes for application-specific use cases.
-  CustomCloseCode(code: Int, data: BitArray)
-  /// No close reason.
+  BadGateway
+  /// An application-specific code, between 3000 and 4999.
+  ApplicationCode(code: Int)
+}
+
+/// Why the connection is closing. A close frame is allowed to carry neither
+/// code nor reason.
+pub type CloseReason {
+  /// A close frame with an empty payload.
   NoCloseReason
+  /// A close frame carrying a status code and a description. The description
+  /// must not exceed 123 bytes.
+  CloseReason(code: CloseCode, reason: String)
+}
+
+fn to_close_code(code: websocks.CloseCode) -> CloseCode {
+  case code {
+    websocks.NormalClosure -> NormalClosure
+    websocks.GoingAway -> GoingAway
+    websocks.ProtocolError -> ProtocolError
+    websocks.UnsupportedData -> UnsupportedData
+    websocks.InvalidPayloadData -> InvalidPayloadData
+    websocks.PolicyViolation -> PolicyViolation
+    websocks.MessageTooBig -> MessageTooBig
+    websocks.MandatoryExtension -> MandatoryExtension
+    websocks.InternalError -> InternalError
+    websocks.ServiceRestart -> ServiceRestart
+    websocks.TryAgainLater -> TryAgainLater
+    websocks.BadGateway -> BadGateway
+    websocks.ApplicationCode(code:) -> ApplicationCode(code:)
+  }
+}
+
+fn to_internal_close_code(code: CloseCode) -> websocks.CloseCode {
+  case code {
+    NormalClosure -> websocks.NormalClosure
+    GoingAway -> websocks.GoingAway
+    ProtocolError -> websocks.ProtocolError
+    UnsupportedData -> websocks.UnsupportedData
+    InvalidPayloadData -> websocks.InvalidPayloadData
+    PolicyViolation -> websocks.PolicyViolation
+    MessageTooBig -> websocks.MessageTooBig
+    MandatoryExtension -> websocks.MandatoryExtension
+    InternalError -> websocks.InternalError
+    ServiceRestart -> websocks.ServiceRestart
+    TryAgainLater -> websocks.TryAgainLater
+    BadGateway -> websocks.BadGateway
+    ApplicationCode(code:) -> websocks.ApplicationCode(code:)
+  }
 }
 
 fn to_close_reason(reason: websocks.CloseReason) -> CloseReason {
   case reason {
-    websocks.NormalClosure(data) -> NormalClosure(data)
-    websocks.GoingAway(data:) -> GoingAway(data:)
-    websocks.ProtocolError(data:) -> ProtocolError(data:)
-    websocks.UnsupportedData(data:) -> UnsupportedData(data:)
-    websocks.InvalidPayloadData(data:) -> InvalidPayloadData(data:)
-    websocks.PolicyViolation(data:) -> PolicyViolation(data:)
-    websocks.MessageTooBig(data:) -> MessageTooBig(data:)
-    websocks.MandatoryExtension(data:) -> MandatoryExtension(data:)
-    websocks.InternalError(data:) -> InternalError(data:)
-    websocks.ServiceRestart(data:) -> ServiceRestart(data:)
-    websocks.TryAgainLater(data:) -> TryAgainLater(data:)
-    websocks.BadGateway(data:) -> BadGateway(data:)
-    websocks.TLSHandshake(data:) -> TLSHandshake(data:)
-    websocks.CustomCloseCode(code:, data:) -> CustomCloseCode(code:, data:)
     websocks.NoCloseReason -> NoCloseReason
+    websocks.CloseReason(code:, reason:) ->
+      CloseReason(code: to_close_code(code), reason:)
   }
 }
 
 fn to_internal_close_reason(reason: CloseReason) -> websocks.CloseReason {
   case reason {
-    NormalClosure(data:) -> websocks.NormalClosure(data:)
-    GoingAway(data:) -> websocks.GoingAway(data:)
-    ProtocolError(data:) -> websocks.ProtocolError(data:)
-    UnsupportedData(data:) -> websocks.UnsupportedData(data:)
-    InvalidPayloadData(data:) -> websocks.InvalidPayloadData(data:)
-    PolicyViolation(data:) -> websocks.PolicyViolation(data:)
-    MessageTooBig(data:) -> websocks.MessageTooBig(data:)
-    MandatoryExtension(data:) -> websocks.MandatoryExtension(data:)
-    InternalError(data:) -> websocks.InternalError(data:)
-    ServiceRestart(data:) -> websocks.ServiceRestart(data:)
-    TryAgainLater(data:) -> websocks.TryAgainLater(data:)
-    BadGateway(data:) -> websocks.BadGateway(data:)
-    TLSHandshake(data:) -> websocks.TLSHandshake(data:)
-    CustomCloseCode(code:, data:) -> websocks.CustomCloseCode(code:, data:)
     NoCloseReason -> websocks.NoCloseReason
+    CloseReason(code:, reason:) ->
+      websocks.CloseReason(code: to_internal_close_code(code), reason:)
+  }
+}
+
+/// Converts a close code to a human-readable string.
+pub fn close_code_to_string(code: CloseCode) -> String {
+  case code {
+    NormalClosure -> "normal closure"
+    GoingAway -> "going away"
+    ProtocolError -> "protocol error"
+    UnsupportedData -> "unsupported data"
+    InvalidPayloadData -> "invalid payload data"
+    PolicyViolation -> "policy violation"
+    MessageTooBig -> "message too big"
+    MandatoryExtension -> "mandatory extension"
+    InternalError -> "internal error"
+    ServiceRestart -> "service restart"
+    TryAgainLater -> "try again later"
+    BadGateway -> "bad gateway"
+    ApplicationCode(code:) -> "application close code " <> int.to_string(code)
   }
 }
 
 /// Converts a close reason to a human-readable string.
 pub fn close_reason_to_string(reason: CloseReason) -> String {
   case reason {
-    NormalClosure(_) -> "normal closure"
-    GoingAway(_) -> "going away"
-    ProtocolError(_) -> "protocol error"
-    UnsupportedData(_) -> "unsupported data"
-    InvalidPayloadData(_) -> "invalid payload data"
-    PolicyViolation(_) -> "policy violation"
-    MessageTooBig(_) -> "message too big"
-    MandatoryExtension(_) -> "mandatory extension"
-    InternalError(_) -> "internal error"
-    ServiceRestart(_) -> "service restart"
-    TryAgainLater(_) -> "try again later"
-    BadGateway(_) -> "bad gateway"
-    TLSHandshake(_) -> "TLS handshake failure"
-    CustomCloseCode(code, _) -> "custom close code " <> int.to_string(code)
     NoCloseReason -> "no close reason"
+    CloseReason(code:, reason: "") -> close_code_to_string(code)
+    CloseReason(code:, reason:) -> close_code_to_string(code) <> ": " <> reason
   }
 }
+
+/// Caps on how much data the server can make this client hold at once. Without
+/// them a server can declare an arbitrarily large frame, or fragment a single
+/// message indefinitely, and exhaust memory.
+pub type Limits {
+  Limits(
+    /// Largest payload a single frame may declare.
+    max_frame_size: Int,
+    /// Largest payload a fragmented message may accumulate to.
+    max_message_size: Int,
+  )
+}
+
+/// 16 MiB per frame, 64 MiB per reassembled message. Use the `with_limits`
+/// function to override them.
+pub const default_limits: Limits = Limits(
+  max_frame_size: 16_777_216,
+  max_message_size: 67_108_864,
+)
 
 /// Contains all client configurations, can be adjusted by different builder
 /// functions.
@@ -456,6 +505,7 @@ pub opaque type Builder(body, state, message, return) {
     request: request.Request(body),
     named: option.Option(process.Name(WebsocketMessage(message))),
     connection_timeout: Int,
+    limits: Limits,
     initialise: fn(process.Subject(WebsocketMessage(message))) ->
       Result(Initialised(state, message, return), String),
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
@@ -475,6 +525,7 @@ pub fn new(
     request:,
     named: option.None,
     connection_timeout: 5000,
+    limits: default_limits,
     initialise: fn(self) { initialised(state) |> returning(self) |> Ok },
     handler: fn(_conn, state, _message) { continue(state) },
     on_close: fn(_state, _reason) { Nil },
@@ -499,6 +550,7 @@ pub fn new_with_initialiser(
     request:,
     named: option.None,
     connection_timeout: 5000,
+    limits: default_limits,
     initialise:,
     handler: fn(_conn, state, _message) { continue(state) },
     on_close: fn(_state, _reason) { Nil },
@@ -513,6 +565,16 @@ pub fn with_connection_timeout(
   connection_timeout: Int,
 ) -> Builder(body, state, message, return) {
   Builder(..builder, connection_timeout:)
+}
+
+/// Sets the caps on how much data a single frame and a single reassembled
+/// message may hold. A server that exceeds them closes the connection with
+/// `MessageTooBig`. Defaults to `default_limits`.
+pub fn with_limits(
+  builder: Builder(body, state, message, return),
+  limits: Limits,
+) -> Builder(body, state, message, return) {
+  Builder(..builder, limits:)
 }
 
 /// Provides a name for the client actor to be registered, enabling it to
@@ -638,9 +700,7 @@ pub fn start(
 
       let extensions =
         response.get_header(response, "sec-websocket-extensions")
-        |> result.map(string.split(_, ";"))
-        |> result.unwrap([])
-        |> list.map(string.trim)
+        |> result.unwrap("")
 
       logging.log(logging.Debug, "Calling initialiser function")
       use Initialised(state, selector, return) <- result.try(builder.initialise(
@@ -658,7 +718,13 @@ pub fn start(
         }
         False -> option.None
       }
-      let context = websocks.create_context(compression, websocks.Client)
+      let Limits(max_frame_size:, max_message_size:) = builder.limits
+      let context =
+        websocks.create_context(compression, websocks.Client)
+        |> websocks.with_limits(websocks.Limits(
+          max_frame_size:,
+          max_message_size:,
+        ))
 
       WebsocketState(
         conn: Connection(transport:, socket:, context:),
@@ -779,7 +845,7 @@ fn handle_message(
     UserMessage(message) -> {
       logging.log(logging.Debug, "Received user message from selector")
       let resolved = call_handler(new_resolve_state(state), User(message))
-      resolve_next(resolved.state, state)
+      resolve_next(resolved, state)
     }
     Passive -> {
       let options =
@@ -790,7 +856,7 @@ fn handle_message(
           let reason = socket.reason_to_string(reason)
           logging.log(logging.Error, "Failed to set socket options: " <> reason)
 
-          InternalError(bit_array.from_string(reason))
+          CloseReason(InternalError, reason)
           |> handle_close(state, _, option.Some(reason))
         }
       }
@@ -800,7 +866,7 @@ fn handle_message(
       let reason = socket.reason_to_string(reason)
       logging.log(logging.Error, "Socket error: " <> reason)
 
-      InternalError(bit_array.from_string(reason))
+      CloseReason(InternalError, reason)
       |> handle_close(state, _, option.Some(reason))
     }
     Close -> {
@@ -832,23 +898,45 @@ fn handle_packet(
   data: BitArray,
   state: WebsocketState(state, message),
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
-  let processed =
-    new_resolve_state(state)
-    |> websocks.process_incoming_frames(data, state.context, _, handle_frame)
+  websocks.push_data(state.context, data)
+  |> drain_frames(state, new_resolve_state(state))
+}
 
-  case processed {
-    Ok(#(resolved, context)) -> {
-      let conn = Connection(..state.conn, context:)
-      resolve_next(resolved, WebsocketState(..state, conn:, context:))
+// `next_frame` hands back a single frame at a time, so keep draining the
+// buffer until it holds no further frame, or a frame stops the connection.
+fn drain_frames(
+  context: websocks.Context,
+  state: WebsocketState(state, message),
+  resolved: ResolveState(state, message),
+) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
+  case websocks.next_frame(context) {
+    Ok(websocks.MoreData(context:)) ->
+      resolve_next(resolved, with_context(state, context))
+
+    Ok(websocks.Decoded(frame:, context:)) -> {
+      let resolved = handle_frame(resolved, context, frame)
+      case resolved.next {
+        Continue(..) -> drain_frames(context, state, resolved)
+        NormalStop | AbnormalStop(..) ->
+          resolve_next(resolved, with_context(state, context))
+      }
     }
+
     Error(violation) -> {
-      let #(variant, reason) = case violation {
+      let #(code, reason) = case violation {
         websocks.DecodeFailed(websocks.InvalidFrame) -> #(
           ProtocolError,
           "Malformed wire format",
         )
+        websocks.DecodeFailed(websocks.FrameTooLarge(length:, limit:)) -> #(
+          MessageTooBig,
+          "Frame declares "
+            <> int.to_string(length)
+            <> " bytes, over the limit of "
+            <> int.to_string(limit),
+        )
         websocks.DecodeFailed(websocks.NotEnoughData(_data)) ->
-          panic as "Unreachable branch for `process_incoming_frames`!"
+          panic as "Unreachable branch for `next_frame`!"
 
         websocks.ResolveFailed(websocks.NotUtf8) -> #(
           InvalidPayloadData,
@@ -858,10 +946,6 @@ fn handle_packet(
           ProtocolError,
           "Continuation frame without a preceding fragmented start",
         )
-        websocks.ResolveFailed(websocks.ControlFrameFragmented) -> #(
-          ProtocolError,
-          "Control frame was fragmented",
-        )
         websocks.ResolveFailed(websocks.FragmentationInterrupted) -> #(
           ProtocolError,
           "Complete text/binary frame received mid-fragmentation",
@@ -870,16 +954,35 @@ fn handle_packet(
           ProtocolError,
           "New fragmented frame started while another is in progress",
         )
-        websocks.ResolveFailed(websocks.CompressedContinuation) -> #(
+        websocks.ResolveFailed(websocks.MessageTooLarge(size:, limit:)) -> #(
+          MessageTooBig,
+          "Message accumulated "
+            <> int.to_string(size)
+            <> " bytes, over the limit of "
+            <> int.to_string(limit),
+        )
+        websocks.ResolveFailed(websocks.DecompressionFailed) -> #(
           ProtocolError,
-          "Continuation frame has RSV1 set",
+          "Payload isn't a valid deflate stream, or inflates past the message limit",
         )
       }
 
       logging.log(logging.Warning, "Protocol violation: " <> reason)
-      handle_close(state, variant(<<reason:utf8>>), option.Some(reason))
+      handle_close(
+        with_context(state, context),
+        CloseReason(code:, reason:),
+        option.Some(reason),
+      )
     }
   }
+}
+
+fn with_context(
+  state: WebsocketState(state, message),
+  context: websocks.Context,
+) -> WebsocketState(state, message) {
+  let conn = Connection(..state.conn, context:)
+  WebsocketState(..state, conn:, context:)
 }
 
 fn resolve_next(
@@ -902,7 +1005,10 @@ fn resolve_next(
     }
     AbnormalStop(reason: reason_string) -> {
       let reason =
-        option.unwrap(resolved.reason, InternalError(<<reason_string:utf8>>))
+        option.unwrap(
+          resolved.reason,
+          CloseReason(InternalError, reason_string),
+        )
       handle_close(state, reason, option.Some(reason_string))
     }
   }
@@ -937,44 +1043,33 @@ fn handle_frame(
   state: ResolveState(state, message),
   context: websocks.Context,
   frame: websocks.Frame,
-) -> websocks.ResolveNext(ResolveState(state, message)) {
+) -> ResolveState(state, message) {
   let conn = Connection(..state.conn, context:)
   let state = ResolveState(..state, conn:)
 
   case frame {
     websocks.Control(websocks.Ping(payload)) -> {
       logging.log(logging.Debug, "Received ping frame")
-      case bit_array.byte_size(payload) {
-        size if size > 125 -> {
-          logging.log(logging.Warning, "Ping payload exceeds 125 bytes")
-          let next = AbnormalStop("control frame payload exceeds 125 octets")
-          let reason =
-            ProtocolError(<<"control frame payload exceeds 125 octets">>)
-            |> option.Some
+      let pong =
+        websocks.encode_pong_frame(
+          payload:,
+          masking: option.Some(crypto.strong_random_bytes(4)),
+        )
+        |> bytes_tree.from_bit_array
 
-          websocks.Stop(ResolveState(..state, next:, reason:))
+      case socket.send(state.conn.transport, state.conn.socket, pong) {
+        Ok(Nil) -> {
+          logging.log(logging.Debug, "Sent pong frame")
+          state
         }
-        _ -> {
-          let pong =
-            option.Some(crypto.strong_random_bytes(4))
-            |> websocks.encode_pong_frame(payload:)
-            |> bytes_tree.from_bit_array
+        Error(reason) -> {
+          let reason =
+            "failed to send pong: " <> socket.reason_to_string(reason)
+          logging.log(logging.Error, reason)
+          let next = AbnormalStop(reason)
+          let reason = option.Some(CloseReason(InternalError, reason))
 
-          case socket.send(state.conn.transport, state.conn.socket, pong) {
-            Ok(Nil) -> {
-              logging.log(logging.Debug, "Sent pong frame")
-              websocks.Continue(state)
-            }
-            Error(reason) -> {
-              let reason =
-                "failed to send pong: " <> socket.reason_to_string(reason)
-              logging.log(logging.Error, reason)
-              let next = AbnormalStop(reason)
-              let reason = option.Some(InternalError(<<reason:utf8>>))
-
-              websocks.Stop(ResolveState(..state, next:, reason:))
-            }
-          }
+          ResolveState(..state, next:, reason:)
         }
       }
     }
@@ -987,18 +1082,20 @@ fn handle_frame(
       )
 
       let _sent =
-        option.Some(crypto.strong_random_bytes(4))
-        |> websocks.encode_close_frame(reason:)
+        websocks.encode_close_frame(
+          reason:,
+          masking: option.Some(crypto.strong_random_bytes(4)),
+        )
         |> bytes_tree.from_bit_array
         |> socket.send(state.conn.transport, state.conn.socket, _)
 
       let reason = option.Some(to_close_reason(reason))
-      websocks.Stop(ResolveState(..state, next: NormalStop, reason:))
+      ResolveState(..state, next: NormalStop, reason:)
     }
 
     websocks.Control(websocks.Pong(_)) -> {
       logging.log(logging.Debug, "Received pong frame")
-      websocks.Continue(state)
+      state
     }
 
     websocks.Text(payload) ->
@@ -1006,7 +1103,7 @@ fn handle_frame(
 
     websocks.Binary(payload) -> call_handler(state, Binary(payload))
 
-    websocks.Continuation(_) -> websocks.Continue(state)
+    websocks.Continuation(_) -> state
   }
 }
 
@@ -1016,7 +1113,7 @@ fn unsafe_to_string(a: BitArray) -> String
 fn call_handler(
   state: ResolveState(state, message),
   message: Message(message),
-) -> websocks.ResolveNext(ResolveState(state, message)) {
+) -> ResolveState(state, message) {
   let assert Continue(user_state, selector) = state.next
 
   let call =
@@ -1025,11 +1122,10 @@ fn call_handler(
     Ok(Continue(user_state, new_selector)) -> {
       let selector = option.or(new_selector, selector)
       ResolveState(..state, next: Continue(user_state, selector))
-      |> websocks.Continue
     }
-    Ok(NormalStop) -> websocks.Stop(ResolveState(..state, next: NormalStop))
+    Ok(NormalStop) -> ResolveState(..state, next: NormalStop)
     Ok(AbnormalStop(reason)) ->
-      websocks.Stop(ResolveState(..state, next: AbnormalStop(reason)))
+      ResolveState(..state, next: AbnormalStop(reason))
     Error(exception) -> {
       let reason = case exception {
         exception.Errored(_dynamic) ->
@@ -1041,9 +1137,9 @@ fn call_handler(
       }
       logging.log(logging.Error, "Handler exception: " <> reason)
       let next = AbnormalStop(reason)
-      let reason = option.Some(InternalError(<<reason:utf8>>))
+      let reason = option.Some(CloseReason(InternalError, reason))
 
-      websocks.Stop(ResolveState(..state, next:, reason:))
+      ResolveState(..state, next:, reason:)
     }
   }
 }
@@ -1090,8 +1186,10 @@ pub fn send_close_frame(
   conn: Connection,
   reason: CloseReason,
 ) -> Result(Nil, SocketReason) {
-  to_internal_close_reason(reason)
-  |> websocks.encode_close_frame(option.Some(crypto.strong_random_bytes(4)))
+  websocks.encode_close_frame(
+    reason: to_internal_close_reason(reason),
+    masking: option.Some(crypto.strong_random_bytes(4)),
+  )
   |> bytes_tree.from_bit_array
   |> socket.send(conn.transport, conn.socket, _)
   |> result.map_error(to_socket_reason)

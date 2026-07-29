@@ -8,7 +8,7 @@ A WebSocket client for Gleam.
 ## Installation
 
 ```sh
-gleam add collie@2
+gleam add collie@3
 ```
 
 ## Autobahn
@@ -152,7 +152,10 @@ fn handle_message(conn, state, message) {
     }
 
     collie.User(Shutdown) ->
-      collie.send_close_frame(conn, collie.NormalClosure(<<>>))
+      collie.send_close_frame(
+        conn,
+        collie.CloseReason(collie.NormalClosure, ""),
+      )
 
     collie.Binary(_) -> collie.continue(state)
   }

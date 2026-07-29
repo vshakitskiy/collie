@@ -1,5 +1,5 @@
 name = "collie"
-version = "2.0.1"
+version = "3.0.0"
 licences = ["Apache-2.0"]
 description = "🐕 Websocket client in Gleam"
 target = "erlang"
@@ -11,7 +11,7 @@ extra_applications = ["ssl"]
 [dependencies]
 gleam_http = ">= 4.3.0 and < 5.0.0"
 gleam_otp = ">= 1.2.0 and < 2.0.0"
-websocks = ">= 3.0.0 and < 4.0.0"
+websocks = ">= 4.0.1 and < 5.0.0"
 gleam_erlang = ">= 1.3.0 and < 2.0.0"
 gleam_crypto = ">= 1.5.1 and < 2.0.0"
 exception = ">= 2.1.0 and < 3.0.0"
