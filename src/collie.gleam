@@ -6,6 +6,7 @@
 ////       "new",
 ////       "new_with_initialiser",
 ////       "with_connection_timeout",
+////       "with_idle_timeout",
 ////       "with_limits",
 ////       "named",
 ////       "on_message",
@@ -42,6 +43,7 @@
 ////     functions: [
 ////       "close_code_to_string",
 ////       "close_reason_to_string",
+////       "disconnect_reason_to_string",
 ////       "socket_reason_to_string"
 ////     ]
 ////   }
@@ -389,8 +391,7 @@ pub type CloseCode {
   ApplicationCode(code: Int)
 }
 
-/// Why the connection is closing. A close frame is allowed to carry neither
-/// code nor reason.
+/// The payload of a WebSocket close frame.
 pub type CloseReason {
   /// A close frame with an empty payload.
   NoCloseReason
@@ -479,6 +480,42 @@ pub fn close_reason_to_string(reason: CloseReason) -> String {
   }
 }
 
+/// Represents the reason why the WebSocket connection was closed.
+pub type DisconnectReason {
+  /// The peer sent a WebSocket close frame.
+  RemoteClose(reason: CloseReason)
+  /// TCP/TLS closed without a WebSocket close frame.
+  TransportClosed
+  /// A socket operation or the transport reported an error.
+  TransportError(reason: SocketReason)
+  /// No incoming socket data arrived within the configured duration.
+  IdleTimeout(timeout_ms: Int)
+  /// Received data violated WebSocket protocol or size constraints.
+  ProtocolViolation(code: CloseCode, description: String)
+  /// The application requested a normal stop.
+  Stopped
+  /// The application requested an abnormal stop, or its handler crashed.
+  StoppedAbnormally(reason: String)
+}
+
+/// Converts a disconnect reason to a human-readable string.
+pub fn disconnect_reason_to_string(reason: DisconnectReason) -> String {
+  case reason {
+    RemoteClose(reason) -> "remote close: " <> close_reason_to_string(reason)
+    TransportClosed -> "transport closed without a WebSocket close frame"
+    TransportError(reason) ->
+      "transport error: " <> socket_reason_to_string(reason)
+    IdleTimeout(timeout_ms) ->
+      "idle timeout after " <> int.to_string(timeout_ms) <> "ms"
+    ProtocolViolation(code, description) ->
+      "protocol violation: "
+      <> close_reason_to_string(CloseReason(code, description))
+    Stopped -> "stopped"
+    StoppedAbnormally(reason: "") -> "stopped abnormally"
+    StoppedAbnormally(reason:) -> "stopped abnormally: " <> reason
+  }
+}
+
 /// Caps on how much data the server can make this client hold at once. Without
 /// them a server can declare an arbitrarily large frame, or fragment a single
 /// message indefinitely, and exhaust memory.
@@ -493,10 +530,8 @@ pub type Limits {
 
 /// 16 MiB per frame, 64 MiB per reassembled message. Use the `with_limits`
 /// function to override them.
-pub const default_limits: Limits = Limits(
-  max_frame_size: 16_777_216,
-  max_message_size: 67_108_864,
-)
+pub const default_limits: Limits =
+  Limits(max_frame_size: 16_777_216, max_message_size: 67_108_864)
 
 /// Contains all client configurations, can be adjusted by different builder
 /// functions.
@@ -505,11 +540,12 @@ pub opaque type Builder(body, state, message, return) {
     request: request.Request(body),
     named: option.Option(process.Name(WebsocketMessage(message))),
     connection_timeout: Int,
+    idle_timeout: option.Option(Int),
     limits: Limits,
     initialise: fn(process.Subject(WebsocketMessage(message))) ->
       Result(Initialised(state, message, return), String),
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
-    on_close: fn(state, CloseReason) -> Nil,
+    on_close: fn(state, DisconnectReason) -> Nil,
   )
 }
 
@@ -525,6 +561,7 @@ pub fn new(
     request:,
     named: option.None,
     connection_timeout: 5000,
+    idle_timeout: option.None,
     limits: default_limits,
     initialise: fn(self) { initialised(state) |> returning(self) |> Ok },
     handler: fn(_conn, state, _message) { continue(state) },
@@ -550,6 +587,7 @@ pub fn new_with_initialiser(
     request:,
     named: option.None,
     connection_timeout: 5000,
+    idle_timeout: option.None,
     limits: default_limits,
     initialise:,
     handler: fn(_conn, state, _message) { continue(state) },
@@ -565,6 +603,15 @@ pub fn with_connection_timeout(
   connection_timeout: Int,
 ) -> Builder(body, state, message, return) {
   Builder(..builder, connection_timeout:)
+}
+
+/// Sets the maximum time without incoming socket data in milliseconds. Disabled
+/// by default. Value of the `timeout_ms` must be more than zero.
+pub fn with_idle_timeout(
+  builder: Builder(body, state, message, return),
+  timeout_ms: Int,
+) -> Builder(body, state, message, return) {
+  Builder(..builder, idle_timeout: option.Some(timeout_ms))
 }
 
 /// Sets the caps on how much data a single frame and a single reassembled
@@ -597,10 +644,10 @@ pub fn on_message(
 }
 
 /// Sets the handler that is called when the connection is closed. The callback
-/// accepts the last value for the state and the closing reason.
+/// accepts the last value for the state and the disconnect reason.
 pub fn on_close(
   builder: Builder(body, state, message, return),
-  on_close: fn(state, CloseReason) -> Nil,
+  on_close: fn(state, DisconnectReason) -> Nil,
 ) -> Builder(body, state, message, return) {
   Builder(..builder, on_close:)
 }
@@ -611,8 +658,14 @@ type WebsocketState(state, message) {
     user: state,
     context: websocks.Context,
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
-    on_close: fn(state, CloseReason) -> Nil,
+    on_close: fn(state, DisconnectReason) -> Nil,
+    self: process.Subject(WebsocketMessage(message)),
+    idle: option.Option(IdleTimer),
   )
+}
+
+type IdleTimer {
+  IdleTimer(timeout_ms: Int, timer_version: Int, timer: process.Timer)
 }
 
 /// Messages received by the underlying actor. This type is exposed so
@@ -620,6 +673,7 @@ type WebsocketState(state, message) {
 /// construct it.
 pub opaque type WebsocketMessage(message) {
   Packet(BitArray)
+  CheckIdle(timer_version: Int)
   UserMessage(message)
   Passive
   SocketError(socket.SocketReason)
@@ -676,6 +730,12 @@ fn coerce_socket_message(record: dynamic.Dynamic) -> WebsocketMessage(message)
 pub fn start(
   builder: Builder(body, state, message, return),
 ) -> Result(actor.Started(return), actor.StartError) {
+  use _valid <- result.try(case builder.idle_timeout {
+    option.Some(timeout_ms) if timeout_ms <= 0 ->
+      Error(actor.InitFailed("Idle timeout must be greater than zero"))
+    option.Some(_timeout_ms) | option.None -> Ok(Nil)
+  })
+
   let transport = case builder.request.scheme {
     http.Https -> socket.Ssl
     http.Http -> socket.Tcp
@@ -732,6 +792,14 @@ pub fn start(
         context:,
         handler: builder.handler,
         on_close: builder.on_close,
+        self:,
+        idle: option.map(builder.idle_timeout, fn(timeout_ms) {
+          IdleTimer(
+            timeout_ms:,
+            timer_version: 0,
+            timer: process.send_after(self, timeout_ms, CheckIdle(0)),
+          )
+        }),
       )
       |> actor.initialised
       |> actor.selecting(create_socket_selector(self, selector))
@@ -840,7 +908,16 @@ fn handle_message(
   message: WebsocketMessage(message),
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
   case message {
-    Packet(data) -> handle_packet(data, state)
+    Packet(data) -> handle_packet(data, reset_idle_timer(state))
+
+    // Cancelling a timer does not retract a timeout already in the mailbox.
+    CheckIdle(timer_version) ->
+      case state.idle {
+        option.Some(IdleTimer(timeout_ms:, timer_version: current, ..))
+          if timer_version == current
+        -> handle_close(state, IdleTimeout(timeout_ms))
+        option.Some(_idle) | option.None -> actor.continue(state)
+      }
 
     UserMessage(message) -> {
       logging.log(logging.Debug, "Received user message from selector")
@@ -852,27 +929,18 @@ fn handle_message(
         socket.set_opts(state.conn.transport, state.conn.socket, socket_mode)
       case options {
         Ok(Nil) -> actor.continue(state)
-        Error(reason) -> {
-          let reason = socket.reason_to_string(reason)
+        Error(socket_reason) -> {
+          let reason = socket.reason_to_string(socket_reason)
           logging.log(logging.Error, "Failed to set socket options: " <> reason)
 
-          CloseReason(InternalError, reason)
-          |> handle_close(state, _, option.Some(reason))
+          handle_close(state, TransportError(to_socket_reason(socket_reason)))
         }
       }
     }
 
-    SocketError(reason) -> {
-      let reason = socket.reason_to_string(reason)
-      logging.log(logging.Error, "Socket error: " <> reason)
-
-      CloseReason(InternalError, reason)
-      |> handle_close(state, _, option.Some(reason))
-    }
-    Close -> {
-      logging.log(logging.Debug, "Socket closed by remote peer")
-      handle_close(state, NoCloseReason, option.None)
-    }
+    SocketError(reason) ->
+      handle_close(state, TransportError(to_socket_reason(reason)))
+    Close -> handle_close(state, TransportClosed)
   }
 }
 
@@ -881,16 +949,20 @@ type ResolveState(state, message) {
     conn: Connection,
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     next: Next(state, message),
-    reason: option.Option(CloseReason),
+    reason: option.Option(DisconnectReason),
+    user: state,
   )
 }
 
-fn new_resolve_state(state: WebsocketState(state, message)) {
+fn new_resolve_state(
+  state: WebsocketState(state, message),
+) -> ResolveState(state, message) {
   ResolveState(
     conn: state.conn,
     handler: state.handler,
     next: Continue(state: state.user, selector: option.None),
     reason: option.None,
+    user: state.user,
   )
 }
 
@@ -969,9 +1041,8 @@ fn drain_frames(
 
       logging.log(logging.Warning, "Protocol violation: " <> reason)
       handle_close(
-        with_context(state, context),
-        CloseReason(code:, reason:),
-        option.Some(reason),
+        WebsocketState(..with_context(state, context), user: resolved.user),
+        ProtocolViolation(code:, description: reason),
       )
     }
   }
@@ -989,53 +1060,77 @@ fn resolve_next(
   resolved: ResolveState(state, message),
   state: WebsocketState(state, message),
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
+  let state = WebsocketState(..state, user: resolved.user)
   case resolved.next {
     Continue(user, selector) -> {
       let next = actor.continue(WebsocketState(..state, user:))
       case selector {
         option.Some(selector) ->
-          process.map_selector(selector, UserMessage)
-          |> actor.with_selector(next, _)
+          actor.with_selector(
+            next,
+            create_socket_selector(state.self, option.Some(selector)),
+          )
         option.None -> next
       }
     }
     NormalStop -> {
-      let reason = option.unwrap(resolved.reason, NoCloseReason)
-      handle_close(state, reason, option.None)
+      let reason = option.unwrap(resolved.reason, Stopped)
+      handle_close(state, reason)
     }
     AbnormalStop(reason: reason_string) -> {
       let reason =
-        option.unwrap(
-          resolved.reason,
-          CloseReason(InternalError, reason_string),
-        )
-      handle_close(state, reason, option.Some(reason_string))
+        option.unwrap(resolved.reason, StoppedAbnormally(reason_string))
+      handle_close(state, reason)
+    }
+  }
+}
+
+fn reset_idle_timer(
+  state: WebsocketState(state, message),
+) -> WebsocketState(state, message) {
+  case state.idle {
+    option.None -> state
+    option.Some(IdleTimer(timeout_ms:, timer_version:, timer:)) -> {
+      let _cancelled = process.cancel_timer(timer)
+      let timer_version = timer_version + 1
+      let timer =
+        process.send_after(state.self, timeout_ms, CheckIdle(timer_version))
+      WebsocketState(
+        ..state,
+        idle: option.Some(IdleTimer(timeout_ms:, timer_version:, timer:)),
+      )
     }
   }
 }
 
 fn handle_close(
   state: WebsocketState(state, message),
-  reason: CloseReason,
-  abnormal: option.Option(String),
-) {
-  let stop = case abnormal {
-    option.Some(reason) -> {
-      logging.log(logging.Warning, "Closing connection abnormally: " <> reason)
-      actor.stop_abnormal(reason)
-    }
-    option.None -> {
-      logging.log(
-        logging.Debug,
-        "Closing connection: " <> close_reason_to_string(reason),
+  reason: DisconnectReason,
+) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
+  let stop = case reason {
+    RemoteClose(_reason) | Stopped -> actor.stop()
+    TransportClosed ->
+      actor.stop_abnormal("Transport closed without a WebSocket close frame")
+    TransportError(reason) ->
+      actor.stop_abnormal(socket_reason_to_string(reason))
+    IdleTimeout(timeout_ms) ->
+      actor.stop_abnormal(
+        "No incoming data for " <> int.to_string(timeout_ms) <> "ms",
       )
-      actor.stop()
-    }
+    ProtocolViolation(_code, description) -> actor.stop_abnormal(description)
+    StoppedAbnormally(reason) -> actor.stop_abnormal(reason)
   }
 
+  case state.idle {
+    option.Some(IdleTimer(timer:, ..)) -> {
+      let _cancelled = process.cancel_timer(timer)
+      Nil
+    }
+    option.None -> Nil
+  }
+  let _closed = socket.close(state.conn.transport, state.conn.socket)
   websocks.close_context(state.context)
   state.on_close(state.user, reason)
-
   stop
 }
 
@@ -1062,12 +1157,13 @@ fn handle_frame(
           logging.log(logging.Debug, "Sent pong frame")
           state
         }
-        Error(reason) -> {
+        Error(socket_reason) -> {
           let reason =
-            "failed to send pong: " <> socket.reason_to_string(reason)
+            "failed to send pong: " <> socket.reason_to_string(socket_reason)
           logging.log(logging.Error, reason)
           let next = AbnormalStop(reason)
-          let reason = option.Some(CloseReason(InternalError, reason))
+          let reason =
+            option.Some(TransportError(to_socket_reason(socket_reason)))
 
           ResolveState(..state, next:, reason:)
         }
@@ -1089,7 +1185,7 @@ fn handle_frame(
         |> bytes_tree.from_bit_array
         |> socket.send(state.conn.transport, state.conn.socket, _)
 
-      let reason = option.Some(to_close_reason(reason))
+      let reason = option.Some(RemoteClose(to_close_reason(reason)))
       ResolveState(..state, next: NormalStop, reason:)
     }
 
@@ -1121,7 +1217,11 @@ fn call_handler(
   case call {
     Ok(Continue(user_state, new_selector)) -> {
       let selector = option.or(new_selector, selector)
-      ResolveState(..state, next: Continue(user_state, selector))
+      ResolveState(
+        ..state,
+        next: Continue(user_state, selector),
+        user: user_state,
+      )
     }
     Ok(NormalStop) -> ResolveState(..state, next: NormalStop)
     Ok(AbnormalStop(reason)) ->
@@ -1137,7 +1237,7 @@ fn call_handler(
       }
       logging.log(logging.Error, "Handler exception: " <> reason)
       let next = AbnormalStop(reason)
-      let reason = option.Some(CloseReason(InternalError, reason))
+      let reason = option.Some(StoppedAbnormally(reason))
 
       ResolveState(..state, next:, reason:)
     }

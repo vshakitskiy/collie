@@ -1,3 +1,12 @@
+# Unreleased
+
+- Add `with_idle_timeout` to detect connections with no incoming socket data
+- Change `on_close` to receive `DisconnectReason`
+- Close sockets and cancel idle timers before invoking `on_close`
+- Preserve socket selectors when replacing a custom selector
+- Properly accumulate the latest user state when processing multiple frames from 
+  one socket packet
+
 # v3.0.0 - 29.07.2026
 
 - Split `CloseReason` into `CloseCode` and `CloseReason`, carrying a `String`
