@@ -8,7 +8,7 @@ A WebSocket client for Gleam.
 ## Installation
 
 ```sh
-gleam add collie@3
+gleam add collie@4
 ```
 
 ## Autobahn
@@ -230,6 +230,52 @@ fn handle_message(conn, state, message) {
   }
 }
 ```
+
+### Idle Timeout and Heartbeat
+
+This example closes the connection after 60 seconds without incoming data and
+sends heartbeat pings to check that the server is still responsive. Each ping
+waits up to one second for a matching pong:
+
+```gleam
+import collie
+import gleam/erlang/process
+import gleam/http/request
+import gleam/io
+import gleam/otp/actor
+
+pub fn main() -> Nil {
+  let assert Ok(req) = request.to("https://echo.websocket.org")
+
+  let client =
+    collie.new(req, Nil)
+    |> collie.with_idle_timeout(60_000)
+    |> collie.with_heartbeat(interval: 30_000, timeout: 1000)
+    |> collie.on_close(handle_close)
+    |> collie.start
+
+  case client {
+    Ok(actor.Started(pid:, ..)) -> {
+      let monitor = process.monitor(pid)
+      let selector =
+        process.new_selector()
+        |> process.select_specific_monitor(monitor, fn(_down) { Nil })
+
+      process.selector_receive_forever(selector)
+    }
+    Error(_reason) -> io.println_error("Could not start the WebSocket client")
+  }
+}
+
+fn handle_close(_state: Nil, reason: collie.DisconnectReason) -> Nil {
+  collie.disconnect_reason_to_string(reason)
+  |> io.println
+}
+```
+
+Both options are disabled by default and can be used independently. A missed
+deadline closes the connection with `IdleTimeout` or `HeartbeatTimeout` reported
+through `on_close`.
 
 ## API Documentation
 
