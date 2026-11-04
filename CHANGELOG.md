@@ -1,5 +1,6 @@
 # Unreleased
 
+- Add `with_heartbeat` for client initiated ping/pong heartbeat
 - Add `with_idle_timeout` to detect connections with no incoming socket data
 - Change `on_close` to receive `DisconnectReason`
 - Close sockets and cancel idle timers before invoking `on_close`

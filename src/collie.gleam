@@ -7,6 +7,7 @@
 ////       "new_with_initialiser",
 ////       "with_connection_timeout",
 ////       "with_idle_timeout",
+////       "with_heartbeat",
 ////       "with_limits",
 ////       "named",
 ////       "on_message",
@@ -490,6 +491,8 @@ pub type DisconnectReason {
   TransportError(reason: SocketReason)
   /// No incoming socket data arrived within the configured duration.
   IdleTimeout(timeout_ms: Int)
+  /// The peer did not acknowledge a heartbeat ping within the configured duration.
+  HeartbeatTimeout(timeout_ms: Int)
   /// Received data violated WebSocket protocol or size constraints.
   ProtocolViolation(code: CloseCode, description: String)
   /// The application requested a normal stop.
@@ -507,6 +510,8 @@ pub fn disconnect_reason_to_string(reason: DisconnectReason) -> String {
       "transport error: " <> socket_reason_to_string(reason)
     IdleTimeout(timeout_ms) ->
       "idle timeout after " <> int.to_string(timeout_ms) <> "ms"
+    HeartbeatTimeout(timeout_ms) ->
+      "heartbeat timeout after " <> int.to_string(timeout_ms) <> "ms"
     ProtocolViolation(code, description) ->
       "protocol violation: "
       <> close_reason_to_string(CloseReason(code, description))
@@ -541,6 +546,7 @@ pub opaque type Builder(body, state, message, return) {
     named: option.Option(process.Name(WebsocketMessage(message))),
     connection_timeout: Int,
     idle_timeout: option.Option(Int),
+    heartbeat: option.Option(#(Int, Int)),
     limits: Limits,
     initialise: fn(process.Subject(WebsocketMessage(message))) ->
       Result(Initialised(state, message, return), String),
@@ -562,6 +568,7 @@ pub fn new(
     named: option.None,
     connection_timeout: 5000,
     idle_timeout: option.None,
+    heartbeat: option.None,
     limits: default_limits,
     initialise: fn(self) { initialised(state) |> returning(self) |> Ok },
     handler: fn(_conn, state, _message) { continue(state) },
@@ -588,6 +595,7 @@ pub fn new_with_initialiser(
     named: option.None,
     connection_timeout: 5000,
     idle_timeout: option.None,
+    heartbeat: option.None,
     limits: default_limits,
     initialise:,
     handler: fn(_conn, state, _message) { continue(state) },
@@ -612,6 +620,17 @@ pub fn with_idle_timeout(
   timeout_ms: Int,
 ) -> Builder(body, state, message, return) {
   Builder(..builder, idle_timeout: option.Some(timeout_ms))
+}
+
+/// Sends heartbeat pings after `interval` milliseconds and waits `timeout`
+/// milliseconds for a matching pong. Disabled by default. Both values must be
+/// greater than zero.
+pub fn with_heartbeat(
+  builder: Builder(body, state, message, return),
+  interval interval: Int,
+  timeout timeout: Int,
+) -> Builder(body, state, message, return) {
+  Builder(..builder, heartbeat: option.Some(#(interval, timeout)))
 }
 
 /// Sets the caps on how much data a single frame and a single reassembled
@@ -661,11 +680,27 @@ type WebsocketState(state, message) {
     on_close: fn(state, DisconnectReason) -> Nil,
     self: process.Subject(WebsocketMessage(message)),
     idle: option.Option(IdleTimer),
+    heartbeat: option.Option(Heartbeat),
   )
 }
 
 type IdleTimer {
   IdleTimer(timeout_ms: Int, timer_version: Int, timer: process.Timer)
+}
+
+type Heartbeat {
+  Heartbeat(
+    interval: Int,
+    timeout: Int,
+    timer_version: Int,
+    timer: process.Timer,
+    phase: HeartbeatPhase,
+  )
+}
+
+type HeartbeatPhase {
+  WaitingForPing
+  WaitingForPong(payload: BitArray)
 }
 
 /// Messages received by the underlying actor. This type is exposed so
@@ -674,6 +709,7 @@ type IdleTimer {
 pub opaque type WebsocketMessage(message) {
   Packet(BitArray)
   CheckIdle(timer_version: Int)
+  CheckHeartbeat(timer_version: Int)
   UserMessage(message)
   Passive
   SocketError(socket.SocketReason)
@@ -734,6 +770,14 @@ pub fn start(
     option.Some(timeout_ms) if timeout_ms <= 0 ->
       Error(actor.InitFailed("Idle timeout must be greater than zero"))
     option.Some(_timeout_ms) | option.None -> Ok(Nil)
+  })
+
+  use _valid <- result.try(case builder.heartbeat {
+    option.Some(#(interval, timeout)) if interval <= 0 || timeout <= 0 ->
+      Error(actor.InitFailed(
+        "Heartbeat interval and timeout must be greater than zero",
+      ))
+    option.Some(_heartbeat) | option.None -> Ok(Nil)
   })
 
   let transport = case builder.request.scheme {
@@ -799,6 +843,11 @@ pub fn start(
             timer_version: 0,
             timer: process.send_after(self, timeout_ms, CheckIdle(0)),
           )
+        }),
+        heartbeat: option.map(builder.heartbeat, fn(settings) {
+          let #(interval, timeout) = settings
+
+          schedule_heartbeat(self, interval, timeout, 0, WaitingForPing)
         }),
       )
       |> actor.initialised
@@ -919,6 +968,8 @@ fn handle_message(
         option.Some(_idle) | option.None -> actor.continue(state)
       }
 
+    CheckHeartbeat(timer_version) -> check_heartbeat(state, timer_version)
+
     UserMessage(message) -> {
       logging.log(logging.Debug, "Received user message from selector")
       let resolved = call_handler(new_resolve_state(state), User(message))
@@ -986,6 +1037,7 @@ fn drain_frames(
       resolve_next(resolved, with_context(state, context))
 
     Ok(websocks.Decoded(frame:, context:)) -> {
+      let state = acknowledge_heartbeat(state, frame)
       let resolved = handle_frame(resolved, context, frame)
       case resolved.next {
         Continue(..) -> drain_frames(context, state, resolved)
@@ -1061,6 +1113,7 @@ fn resolve_next(
   state: WebsocketState(state, message),
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
   let state = WebsocketState(..state, user: resolved.user)
+
   case resolved.next {
     Continue(user, selector) -> {
       let next = actor.continue(WebsocketState(..state, user:))
@@ -1075,11 +1128,13 @@ fn resolve_next(
     }
     NormalStop -> {
       let reason = option.unwrap(resolved.reason, Stopped)
+
       handle_close(state, reason)
     }
     AbnormalStop(reason: reason_string) -> {
       let reason =
         option.unwrap(resolved.reason, StoppedAbnormally(reason_string))
+
       handle_close(state, reason)
     }
   }
@@ -1092,14 +1147,129 @@ fn reset_idle_timer(
     option.None -> state
     option.Some(IdleTimer(timeout_ms:, timer_version:, timer:)) -> {
       let _cancelled = process.cancel_timer(timer)
+
       let timer_version = timer_version + 1
       let timer =
         process.send_after(state.self, timeout_ms, CheckIdle(timer_version))
+
       WebsocketState(
         ..state,
         idle: option.Some(IdleTimer(timeout_ms:, timer_version:, timer:)),
       )
     }
+  }
+}
+
+fn schedule_heartbeat(
+  self: process.Subject(WebsocketMessage(message)),
+  interval: Int,
+  timeout: Int,
+  timer_version: Int,
+  phase: HeartbeatPhase,
+) -> Heartbeat {
+  let delay = case phase {
+    WaitingForPing -> interval
+    WaitingForPong(_payload) -> timeout
+  }
+
+  let timer = process.send_after(self, delay, CheckHeartbeat(timer_version))
+
+  Heartbeat(interval:, timeout:, timer_version:, timer:, phase:)
+}
+
+fn check_heartbeat(
+  state: WebsocketState(state, message),
+  timer_version: Int,
+) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
+  case state.heartbeat {
+    option.Some(
+      Heartbeat(timer_version: current, phase: WaitingForPing, ..) as heartbeat,
+    )
+      if timer_version == current
+    -> {
+      let payload = crypto.strong_random_bytes(16)
+
+      case send_ping(state.conn, payload) {
+        Ok(Nil) -> {
+          logging.log(
+            logging.Debug,
+            "Sent heartbeat ping, waiting "
+              <> int.to_string(heartbeat.timeout)
+              <> "ms for pong",
+          )
+
+          let heartbeat =
+            schedule_heartbeat(
+              state.self,
+              heartbeat.interval,
+              heartbeat.timeout,
+              timer_version + 1,
+              WaitingForPong(payload),
+            )
+
+          actor.continue(
+            WebsocketState(..state, heartbeat: option.Some(heartbeat)),
+          )
+        }
+        Error(reason) -> {
+          logging.log(
+            logging.Error,
+            "Failed to send heartbeat ping: " <> socket_reason_to_string(reason),
+          )
+
+          handle_close(state, TransportError(reason))
+        }
+      }
+    }
+    option.Some(Heartbeat(
+      timer_version: current,
+      phase: WaitingForPong(_payload),
+      timeout:,
+      ..,
+    ))
+      if timer_version == current
+    -> {
+      logging.log(
+        logging.Debug,
+        "Heartbeat pong not received within " <> int.to_string(timeout) <> "ms",
+      )
+
+      handle_close(state, HeartbeatTimeout(timeout))
+    }
+    option.Some(_heartbeat) | option.None -> actor.continue(state)
+  }
+}
+
+fn acknowledge_heartbeat(
+  state: WebsocketState(state, message),
+  frame: websocks.Frame,
+) -> WebsocketState(state, message) {
+  case frame, state.heartbeat {
+    websocks.Control(websocks.Pong(payload)),
+      option.Some(Heartbeat(phase: WaitingForPong(expected), ..) as heartbeat)
+      if payload == expected
+    -> {
+      let _cancelled = process.cancel_timer(heartbeat.timer)
+
+      logging.log(
+        logging.Debug,
+        "Received heartbeat pong, next ping in "
+          <> int.to_string(heartbeat.interval)
+          <> "ms",
+      )
+
+      let heartbeat =
+        schedule_heartbeat(
+          state.self,
+          heartbeat.interval,
+          heartbeat.timeout,
+          heartbeat.timer_version + 1,
+          WaitingForPing,
+        )
+
+      WebsocketState(..state, heartbeat: option.Some(heartbeat))
+    }
+    _frame, _heartbeat -> state
   }
 }
 
@@ -1117,6 +1287,10 @@ fn handle_close(
       actor.stop_abnormal(
         "No incoming data for " <> int.to_string(timeout_ms) <> "ms",
       )
+    HeartbeatTimeout(timeout_ms) ->
+      actor.stop_abnormal(
+        disconnect_reason_to_string(HeartbeatTimeout(timeout_ms)),
+      )
     ProtocolViolation(_code, description) -> actor.stop_abnormal(description)
     StoppedAbnormally(reason) -> actor.stop_abnormal(reason)
   }
@@ -1128,9 +1302,19 @@ fn handle_close(
     }
     option.None -> Nil
   }
+
+  case state.heartbeat {
+    option.Some(Heartbeat(timer:, ..)) -> {
+      let _cancelled = process.cancel_timer(timer)
+      Nil
+    }
+    option.None -> Nil
+  }
+
   let _closed = socket.close(state.conn.transport, state.conn.socket)
   websocks.close_context(state.context)
   state.on_close(state.user, reason)
+
   stop
 }
 
