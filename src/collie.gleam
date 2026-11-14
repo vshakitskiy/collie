@@ -36,6 +36,14 @@
 ////     ]
 ////   },
 ////   {
+////     header: "Close handler",
+////     functions: [
+////       "close",
+////       "close_abnormal",
+////       "default_close_handler"
+////     ]
+////   },
+////   {
 ////     header: "User messages",
 ////     functions: ["to_user_message"]
 ////   },
