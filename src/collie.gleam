@@ -561,25 +561,25 @@ pub opaque type Builder(body, state, message, return) {
       Result(Initialised(state, message, return), String),
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, DisconnectReason) -> Nil,
-    close_policy: fn(DisconnectReason) -> CloseType,
+    close_policy: fn(DisconnectReason) -> CloseNext,
   )
 }
 
 /// Used to decide whether you want to stop or stop abnormally after closing
 /// a websocket connection. 
-pub opaque type CloseType {
+pub opaque type CloseNext {
   CloseNormal
   CloseAbnormal(reason: String)
 }
 
 /// Stops the websocket actor after a connection close, functionally equivalent to [`stop`](#stop).
-pub fn close() -> CloseType {
+pub fn close() -> CloseNext {
   CloseNormal
 }
 
 /// Abnormally stops the websocket actor after a connection close,
 /// functionally equivalent to [`stop_abnormal`](#stop_abnormal)
-pub fn close_abnormal(reason: String) -> CloseType {
+pub fn close_abnormal(reason: String) -> CloseNext {
   CloseAbnormal(reason:)
 }
 
@@ -607,7 +607,7 @@ pub fn new(
 
 /// Used to fallback to the default close policy in case you don't want to modify
 /// all cases.
-pub fn default_close_policy(reason: DisconnectReason) -> CloseType {
+pub fn default_close_policy(reason: DisconnectReason) -> CloseNext {
   case reason {
     RemoteClose(_reason) | Stopped -> CloseNormal
     TransportClosed ->
@@ -740,7 +740,7 @@ pub fn on_close(
 /// ```
 pub fn with_close_policy(
   builder: Builder(body, state, message, return),
-  close_policy: fn(DisconnectReason) -> CloseType,
+  close_policy: fn(DisconnectReason) -> CloseNext,
 ) -> Builder(body, state, message, return) {
   Builder(..builder, close_policy:)
 }
@@ -752,7 +752,7 @@ type WebsocketState(state, message) {
     context: websocks.Context,
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, DisconnectReason) -> Nil,
-    close_policy: fn(DisconnectReason) -> CloseType,
+    close_policy: fn(DisconnectReason) -> CloseNext,
     self: process.Subject(WebsocketMessage(message)),
     idle: option.Option(IdleTimer),
     heartbeat: option.Option(Heartbeat),
