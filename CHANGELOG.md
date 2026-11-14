@@ -1,3 +1,8 @@
+# Unreleased
+- Add `with_close_policy` to decide between `stop`/`stop_abnormal` after disconnecting
+- Add `CloseNext` as a supplement type to `with_close_policy`
+- Add `default_close_policy` for falling back to default collie close policy
+
 # v4.0.0 - 04.11.2026
 
 - Add `with_heartbeat` for client initiated ping/pong heartbeat
