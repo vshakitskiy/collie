@@ -561,26 +561,27 @@ pub opaque type Builder(body, state, message, return) {
       Result(Initialised(state, message, return), String),
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, DisconnectReason) -> Nil,
-    close_policy: fn(DisconnectReason) -> CloseNext,
+    close_policy: fn(DisconnectReason) -> CloseAction,
   )
 }
 
-/// Used to decide whether you want to stop or stop abnormally after closing
-/// a websocket connection. 
-pub opaque type CloseNext {
-  CloseNormal
-  CloseAbnormal(reason: String)
+/// Represents an instruction to stop the actor normally or abnormally after
+/// the WebSocket connection is closed.
+///
+/// Use `close` and `close_abnormal` to construct this type.
+pub opaque type CloseAction {
+  NormalClose
+  AbnormalClose(reason: String)
 }
 
-/// Stops the websocket actor after a connection close, functionally equivalent to [`stop`](#stop).
-pub fn close() -> CloseNext {
-  CloseNormal
+/// Instructs the close policy to stop the actor normally.
+pub fn close() -> CloseAction {
+  NormalClose
 }
 
-/// Abnormally stops the websocket actor after a connection close,
-/// functionally equivalent to [`stop_abnormal`](#stop_abnormal)
-pub fn close_abnormal(reason: String) -> CloseNext {
-  CloseAbnormal(reason:)
+/// Instructs the close policy to stop the actor with an abnormal reason.
+pub fn close_abnormal(reason: String) -> CloseAction {
+  AbnormalClose(reason:)
 }
 
 /// Creates a new builder to set up WebSocket client with default configuration
@@ -605,22 +606,27 @@ pub fn new(
   )
 }
 
-/// Used to fallback to the default close policy in case you don't want to modify
-/// all cases.
-pub fn default_close_policy(reason: DisconnectReason) -> CloseNext {
+/// Returns the default stop instruction for a disconnect reason.
+///
+/// Remote closes and explicit normal stops terminate the actor normally. All
+/// other disconnect reasons terminate it abnormally.
+///
+/// Use this function as a fallback in a custom close policy to preserve the
+/// default behaviour.
+pub fn default_close_policy(reason: DisconnectReason) -> CloseAction {
   case reason {
-    RemoteClose(_reason) | Stopped -> CloseNormal
+    RemoteClose(_reason) | Stopped -> NormalClose
     TransportClosed ->
-      CloseAbnormal("Transport closed without a WebSocket close frame")
-    TransportError(reason) -> CloseAbnormal(socket_reason_to_string(reason))
+      AbnormalClose("Transport closed without a WebSocket close frame")
+    TransportError(reason) -> AbnormalClose(socket_reason_to_string(reason))
     IdleTimeout(timeout_ms) ->
-      CloseAbnormal(
+      AbnormalClose(
         "No incoming data for " <> int.to_string(timeout_ms) <> "ms",
       )
     HeartbeatTimeout(timeout_ms) ->
-      CloseAbnormal(disconnect_reason_to_string(HeartbeatTimeout(timeout_ms)))
-    ProtocolViolation(_code, description) -> CloseAbnormal(description)
-    StoppedAbnormally(reason) -> CloseAbnormal(reason)
+      AbnormalClose(disconnect_reason_to_string(HeartbeatTimeout(timeout_ms)))
+    ProtocolViolation(_code, description) -> AbnormalClose(description)
+    StoppedAbnormally(reason) -> AbnormalClose(reason)
   }
 }
 
@@ -720,27 +726,29 @@ pub fn on_close(
   Builder(..builder, on_close:)
 }
 
-/// Used to decide whether to stop the actor normally or abnormally
-/// when a connection is closed.
+/// Sets the policy that decides whether to stop the actor normally or 
+/// abnormally when the connection is closed. The policy is called after cleanup 
+/// and `on_close`.
 ///
-/// Usage example:
+/// Defaults to `default_close_policy`.
+///
 /// ```gleam
-/// collie.new(request)
+/// collie.new(request, Nil)
 /// |> collie.with_close_policy(fn(reason) {
 ///   case reason {
-///     // treat TCP disconnections as regular stops
+///     // Stop normally if the transport closes without a WebSocket close frame.
 ///     collie.TransportClosed -> collie.close()
-///     // treat WS disconnections without a close reason as abnormal
+///     // Stop abnormally if the peer sends a close frame without a reason.
 ///     collie.RemoteClose(collie.NoCloseReason) ->
-///       collie.close_abnormal("Closed without close reason")
-///     // treat all other disconnections the same way as the default collie behavior
+///       collie.close_abnormal("Closed without a close reason")
+///     // Preserve the default behaviour for all other disconnect reasons.
 ///     _ -> collie.default_close_policy(reason)
 ///   }
 /// })
 /// ```
 pub fn with_close_policy(
   builder: Builder(body, state, message, return),
-  close_policy: fn(DisconnectReason) -> CloseNext,
+  close_policy: fn(DisconnectReason) -> CloseAction,
 ) -> Builder(body, state, message, return) {
   Builder(..builder, close_policy:)
 }
@@ -752,7 +760,7 @@ type WebsocketState(state, message) {
     context: websocks.Context,
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, DisconnectReason) -> Nil,
-    close_policy: fn(DisconnectReason) -> CloseNext,
+    close_policy: fn(DisconnectReason) -> CloseAction,
     self: process.Subject(WebsocketMessage(message)),
     idle: option.Option(IdleTimer),
     heartbeat: option.Option(Heartbeat),
@@ -1374,8 +1382,8 @@ fn handle_close(
   state.on_close(state.user, reason)
 
   case state.close_policy(reason) {
-    CloseNormal -> actor.stop()
-    CloseAbnormal(reason:) -> actor.stop_abnormal(reason)
+    NormalClose -> actor.stop()
+    AbnormalClose(reason:) -> actor.stop_abnormal(reason)
   }
 }
 

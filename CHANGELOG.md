@@ -1,7 +1,11 @@
-# Unreleased
-- Add `with_close_policy` to decide between `stop`/`stop_abnormal` after disconnecting
-- Add `CloseNext` as a supplement type to `with_close_policy`
-- Add `default_close_policy` for falling back to default collie close policy
+# v4.1.0 - 15.11.2026
+
+- Add `with_close_policy` to choose normal or abnormal termination for each
+  disconnect reason
+- Add `CloseAction`, `close` and `close_abnormal` to construct close policy
+  results
+- Add `default_close_policy` to preserve the default behaviour in custom
+  policies
 
 # v4.0.0 - 04.11.2026
 
