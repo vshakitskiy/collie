@@ -5,6 +5,7 @@
 ////     functions: [
 ////       "new",
 ////       "new_with_initialiser",
+////       "with_close_policy",
 ////       "with_connection_timeout",
 ////       "with_idle_timeout",
 ////       "with_heartbeat",
@@ -33,6 +34,14 @@
 ////       "send_text_frame",
 ////       "send_binary_frame",
 ////       "send_close_frame"
+////     ]
+////   },
+////   {
+////     header: "Close policy",
+////     functions: [
+////       "close",
+////       "close_abnormal",
+////       "default_close_policy"
 ////     ]
 ////   },
 ////   {
@@ -552,7 +561,26 @@ pub opaque type Builder(body, state, message, return) {
       Result(Initialised(state, message, return), String),
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, DisconnectReason) -> Nil,
+    close_policy: fn(DisconnectReason) -> CloseNext,
   )
+}
+
+/// Used to decide whether you want to stop or stop abnormally after closing
+/// a websocket connection. 
+pub opaque type CloseNext {
+  CloseNormal
+  CloseAbnormal(reason: String)
+}
+
+/// Stops the websocket actor after a connection close, functionally equivalent to [`stop`](#stop).
+pub fn close() -> CloseNext {
+  CloseNormal
+}
+
+/// Abnormally stops the websocket actor after a connection close,
+/// functionally equivalent to [`stop_abnormal`](#stop_abnormal)
+pub fn close_abnormal(reason: String) -> CloseNext {
+  CloseAbnormal(reason:)
 }
 
 /// Creates a new builder to set up WebSocket client with default configuration
@@ -573,7 +601,27 @@ pub fn new(
     initialise: fn(self) { initialised(state) |> returning(self) |> Ok },
     handler: fn(_conn, state, _message) { continue(state) },
     on_close: fn(_state, _reason) { Nil },
+    close_policy: default_close_policy,
   )
+}
+
+/// Used to fallback to the default close policy in case you don't want to modify
+/// all cases.
+pub fn default_close_policy(reason: DisconnectReason) -> CloseNext {
+  case reason {
+    RemoteClose(_reason) | Stopped -> CloseNormal
+    TransportClosed ->
+      CloseAbnormal("Transport closed without a WebSocket close frame")
+    TransportError(reason) -> CloseAbnormal(socket_reason_to_string(reason))
+    IdleTimeout(timeout_ms) ->
+      CloseAbnormal(
+        "No incoming data for " <> int.to_string(timeout_ms) <> "ms",
+      )
+    HeartbeatTimeout(timeout_ms) ->
+      CloseAbnormal(disconnect_reason_to_string(HeartbeatTimeout(timeout_ms)))
+    ProtocolViolation(_code, description) -> CloseAbnormal(description)
+    StoppedAbnormally(reason) -> CloseAbnormal(reason)
+  }
 }
 
 /// Creates a new builder to set up WebSocket client with a custom initialiser
@@ -600,6 +648,7 @@ pub fn new_with_initialiser(
     initialise:,
     handler: fn(_conn, state, _message) { continue(state) },
     on_close: fn(_state, _reason) { Nil },
+    close_policy: default_close_policy,
   )
 }
 
@@ -671,6 +720,31 @@ pub fn on_close(
   Builder(..builder, on_close:)
 }
 
+/// Used to decide whether to stop the actor normally or abnormally
+/// when a connection is closed.
+///
+/// Usage example:
+/// ```gleam
+/// collie.new(request)
+/// |> collie.with_close_policy(fn(reason) {
+///   case reason {
+///     // treat TCP disconnections as regular stops
+///     collie.TransportClosed -> collie.close()
+///     // treat WS disconnections without a close reason as abnormal
+///     collie.RemoteClose(collie.NoCloseReason) ->
+///       collie.close_abnormal("Closed without close reason")
+///     // treat all other disconnections the same way as the default collie behavior
+///     _ -> collie.default_close_policy(reason)
+///   }
+/// })
+/// ```
+pub fn with_close_policy(
+  builder: Builder(body, state, message, return),
+  close_policy: fn(DisconnectReason) -> CloseNext,
+) -> Builder(body, state, message, return) {
+  Builder(..builder, close_policy:)
+}
+
 type WebsocketState(state, message) {
   WebsocketState(
     conn: Connection,
@@ -678,6 +752,7 @@ type WebsocketState(state, message) {
     context: websocks.Context,
     handler: fn(Connection, state, Message(message)) -> Next(state, message),
     on_close: fn(state, DisconnectReason) -> Nil,
+    close_policy: fn(DisconnectReason) -> CloseNext,
     self: process.Subject(WebsocketMessage(message)),
     idle: option.Option(IdleTimer),
     heartbeat: option.Option(Heartbeat),
@@ -836,6 +911,7 @@ pub fn start(
         context:,
         handler: builder.handler,
         on_close: builder.on_close,
+        close_policy: builder.close_policy,
         self:,
         idle: option.map(builder.idle_timeout, fn(timeout_ms) {
           IdleTimer(
@@ -1277,24 +1353,6 @@ fn handle_close(
   state: WebsocketState(state, message),
   reason: DisconnectReason,
 ) -> actor.Next(WebsocketState(state, message), WebsocketMessage(message)) {
-  let stop = case reason {
-    RemoteClose(_reason) | Stopped -> actor.stop()
-    TransportClosed ->
-      actor.stop_abnormal("Transport closed without a WebSocket close frame")
-    TransportError(reason) ->
-      actor.stop_abnormal(socket_reason_to_string(reason))
-    IdleTimeout(timeout_ms) ->
-      actor.stop_abnormal(
-        "No incoming data for " <> int.to_string(timeout_ms) <> "ms",
-      )
-    HeartbeatTimeout(timeout_ms) ->
-      actor.stop_abnormal(
-        disconnect_reason_to_string(HeartbeatTimeout(timeout_ms)),
-      )
-    ProtocolViolation(_code, description) -> actor.stop_abnormal(description)
-    StoppedAbnormally(reason) -> actor.stop_abnormal(reason)
-  }
-
   case state.idle {
     option.Some(IdleTimer(timer:, ..)) -> {
       let _cancelled = process.cancel_timer(timer)
@@ -1315,7 +1373,10 @@ fn handle_close(
   websocks.close_context(state.context)
   state.on_close(state.user, reason)
 
-  stop
+  case state.close_policy(reason) {
+    CloseNormal -> actor.stop()
+    CloseAbnormal(reason:) -> actor.stop_abnormal(reason)
+  }
 }
 
 fn handle_frame(
